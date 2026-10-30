@@ -262,10 +262,10 @@ $config['session_hmac_secret']     = getenv('APP_KEY') ?: '';
 $config['cookie_prefix']           = '';
 $config['cookie_domain']           = '';
 $config['cookie_path']             = '/';
-$config['cookie_secure']           = FALSE;
+$config['cookie_secure']           = strtolower(getenv('APP_ENV') ?: 'development') === 'production';
 $config['cookie_expiration']       = 86400;
 $config['cookie_httponly']         = FALSE;
-$config['cookie_samesite']         = 'Strict';
+$config['cookie_samesite']         = $config['cookie_secure'] ? 'None' : 'Strict';
 
 /*
 |--------------------------------------------------------------------------
@@ -365,6 +365,8 @@ $config['csrf_regenerate']         = FALSE;
 |   ];
 |
 */
+$frontend_origin = rtrim((string) (getenv('FRONTEND_ORIGIN') ?: ''), '/');
+
 $config['security_headers'] = [
     // ── CSP ──
     'csp_enabled' => false,
@@ -399,10 +401,10 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => [],
-        'credentials'     => false,
+        'allowed_origins' => $frontend_origin !== '' ? [$frontend_origin] : [],
+        'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'headers'         => 'Authorization, Content-Type, X-Requested-With',
+        'headers'         => 'Authorization, Content-Type, X-Requested-With, X-CSRF-Token',
         'max_age'         => 600,
     ],
 ];
