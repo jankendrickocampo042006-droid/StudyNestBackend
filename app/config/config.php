@@ -366,6 +366,10 @@ $config['csrf_regenerate']         = FALSE;
 |
 */
 $frontend_origin = rtrim((string) (getenv('FRONTEND_ORIGIN') ?: ''), '/');
+$allowed_frontend_origins = array_values(array_unique(array_filter([
+    $frontend_origin,
+    'https://studynest-r85g.onrender.com',
+])));
 
 $config['security_headers'] = [
     // ── CSP ──
@@ -401,7 +405,7 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => $frontend_origin !== '' ? [$frontend_origin] : [],
+        'allowed_origins' => $allowed_frontend_origins,
         'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'headers'         => 'Authorization, Content-Type, X-Requested-With, X-CSRF-Token',
