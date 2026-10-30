@@ -1,6 +1,9 @@
 ARG PHP_VERSION=8.5
  
 FROM php:${PHP_VERSION}-apache
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+ENV COMPOSER_ALLOW_SUPERUSER=1
  
 # Install PDO MySQL
 RUN docker-php-ext-install pdo pdo_mysql
@@ -12,7 +15,11 @@ RUN a2enmod rewrite
 RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
  
 # Copy app files
+WORKDIR /var/www/html
 COPY . /var/www/html/
+
+# Dependencies are excluded from Git, so install them in the image.
+RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
  
 # Fix permissions
 RUN chown -R www-data:www-data /var/www/html \
