@@ -437,8 +437,9 @@ class Router
             $url = '/' . $url;
         }
 
+        handle_cors();
+
         if ($method === 'OPTIONS') {
-            handle_cors();
             http_response_code(204);
             exit;
         }
