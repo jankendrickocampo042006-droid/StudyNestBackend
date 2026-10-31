@@ -8,6 +8,194 @@ class StudyNestLearningApi extends StudyNestApiBase
     public function bootstrap()
     {
         $user = $this->current_user();
+        $catalog = $this->one(<<<'SQL'
+            SELECT
+                (
+                    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                        'id', t.id,
+                        'subject_id', t.subject_id,
+                        'title', t.title,
+                        'summary', t.summary
+                    )), JSON_ARRAY())
+                    FROM topics t
+                ) AS topics,
+                (
+                    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                        'id', s.id,
+                        'name', s.name,
+                        'description', s.description,
+                        'lessons', COALESCE(lc.lessons, 0),
+                        'quizzes', COALESCE(qc.quizzes, 0),
+                        'progress', CASE WHEN COALESCE(lc.lessons, 0) = 0 THEN 0
+                            ELSE ROUND(100 * COALESCE(lc.reviewed, 0) / lc.lessons) END
+                    )), JSON_ARRAY())
+                    FROM subjects s
+                    LEFT JOIN (
+                        SELECT t.subject_id, COUNT(l.id) AS lessons, COUNT(lr.lesson_id) AS reviewed
+                        FROM topics t
+                        LEFT JOIN lessons l ON l.topic_id = t.id
+                        LEFT JOIN lesson_reviews lr ON lr.lesson_id = l.id AND lr.user_id = ?
+                        GROUP BY t.subject_id
+                    ) lc ON lc.subject_id = s.id
+                    LEFT JOIN (
+                        SELECT t.subject_id, COUNT(q.id) AS quizzes
+                        FROM topics t
+                        LEFT JOIN quizzes q ON q.topic_id = t.id
+                        GROUP BY t.subject_id
+                    ) qc ON qc.subject_id = s.id
+                ) AS subjects,
+                (
+                    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                        'id', l.id,
+                        'topic_id', l.topic_id,
+                        'subject', s.name,
+                        'topic', t.title,
+                        'title', l.title,
+                        'content', l.content,
+                        'pdf_original_name', l.pdf_original_name
+                    )), JSON_ARRAY())
+                    FROM lessons l
+                    JOIN topics t ON t.id = l.topic_id
+                    JOIN subjects s ON s.id = t.subject_id
+                ) AS lessons,
+                (
+                    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                        'id', q.id,
+                        'topic_id', q.topic_id,
+                        'title', q.title,
+                        'subject', s.name,
+                        'topic', t.title,
+                        'time', q.duration_minutes,
+                        'questions', COALESCE(qc.questions, 0)
+                    )), JSON_ARRAY())
+                    FROM quizzes q
+                    JOIN topics t ON t.id = q.topic_id
+                    JOIN subjects s ON s.id = t.subject_id
+                    LEFT JOIN (
+                        SELECT quiz_id, COUNT(*) AS questions
+                        FROM quiz_questions
+                        GROUP BY quiz_id
+                    ) qc ON qc.quiz_id = q.id
+                ) AS quizzes
+            SQL, [$user ? (int) $user['id'] : 0]);
+        $user_data = null;
+        if ($user) {
+            $user_id = (int) $user['id'];
+            $user_data = $this->one(<<<'SQL'
+                SELECT
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'id', ss.id,
+                            'title', ss.title,
+                            'description', ss.description,
+                            'created_at', ss.created_at,
+                            'subject', s.name,
+                            'topic', t.title,
+                            'cards', (
+                                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                                    'id', f.id,
+                                    'term', f.term_question,
+                                    'answer', f.answer_definition
+                                )), JSON_ARRAY())
+                                FROM flashcards f
+                                WHERE f.study_set_id = ss.id
+                            )
+                        )), JSON_ARRAY())
+                        FROM study_sets ss
+                        LEFT JOIN subjects s ON s.id = ss.subject_id
+                        LEFT JOIN topics t ON t.id = ss.topic_id
+                        WHERE ss.user_id = ?
+                    ) AS sets,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'id', id,
+                            'title', title,
+                            'date', schedule_date,
+                            'time', schedule_time,
+                            'note', reminder_note
+                        )), JSON_ARRAY())
+                        FROM study_schedules
+                        WHERE user_id = ?
+                    ) AS schedules,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(lesson_id), JSON_ARRAY())
+                        FROM favorite_lessons
+                        WHERE user_id = ?
+                    ) AS favorites,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(lesson_id), JSON_ARRAY())
+                        FROM lesson_reviews
+                        WHERE user_id = ?
+                    ) AS reviewed_lessons,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'type', recent.activity_type,
+                            'title', recent.title,
+                            'details', recent.details,
+                            'created_at', recent.created_at
+                        )), JSON_ARRAY())
+                        FROM (
+                            SELECT activity_type, title, details, created_at
+                            FROM user_activities
+                            WHERE user_id = ?
+                            ORDER BY created_at DESC
+                            LIMIT 30
+                        ) recent
+                    ) AS activities,
+                    (
+                        SELECT COALESCE(SUM(duration_seconds), 0)
+                        FROM user_activities
+                        WHERE user_id = ?
+                    ) AS study_time_seconds,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'study_date', daily.study_date,
+                            'duration_seconds', daily.duration_seconds
+                        )), JSON_ARRAY())
+                        FROM (
+                            SELECT DATE(created_at) AS study_date, SUM(duration_seconds) AS duration_seconds
+                            FROM user_activities
+                            WHERE user_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+                            GROUP BY DATE(created_at)
+                        ) daily
+                    ) AS weekly_study,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'id', weak.id,
+                            'title', weak.title,
+                            'subject', weak.subject,
+                            'average_score', weak.average_score,
+                            'attempts', weak.attempts
+                        )), JSON_ARRAY())
+                        FROM (
+                            SELECT t.id, t.title, s.name AS subject,
+                                ROUND(AVG(qa.percentage)) AS average_score, COUNT(qa.id) AS attempts
+                            FROM quiz_attempts qa
+                            JOIN quizzes q ON q.id = qa.quiz_id
+                            JOIN topics t ON t.id = q.topic_id
+                            JOIN subjects s ON s.id = t.subject_id
+                            WHERE qa.user_id = ?
+                            GROUP BY t.id, t.title, s.name
+                            HAVING AVG(qa.percentage) < 70
+                            ORDER BY average_score ASC
+                            LIMIT 5
+                        ) weak
+                    ) AS weak_topics,
+                    (
+                        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                            'title', q.title,
+                            'subject', s.name,
+                            'score', qa.percentage,
+                            'date', qa.completed_at
+                        )), JSON_ARRAY())
+                        FROM quiz_attempts qa
+                        JOIN quizzes q ON q.id = qa.quiz_id
+                        JOIN topics t ON t.id = q.topic_id
+                        JOIN subjects s ON s.id = t.subject_id
+                        WHERE qa.user_id = ?
+                    ) AS attempts
+                SQL, array_fill(0, 9, $user_id));
+        }
         $payload = [
             'csrf_token' => $this->csrf_token(),
             'user' => $user ? [
@@ -27,28 +215,20 @@ class StudyNestLearningApi extends StudyNestApiBase
             'studyTimeSeconds' => 0,
             'weeklyStudy' => [],
             'weakTopics' => [],
-            'topics' => $this->all('SELECT id, subject_id, title, summary FROM topics ORDER BY subject_id, title'),
-            'subjects' => $this->all(
-                'SELECT s.id, s.name, s.description, COUNT(DISTINCT l.id) AS lessons, COUNT(DISTINCT q.id) AS quizzes,
-                 CASE WHEN COUNT(DISTINCT l.id) = 0 THEN 0
-                 ELSE ROUND(100 * COUNT(DISTINCT lr.lesson_id) / COUNT(DISTINCT l.id)) END AS progress
-                 FROM subjects s LEFT JOIN topics t ON t.subject_id = s.id
-                 LEFT JOIN lessons l ON l.topic_id = t.id LEFT JOIN quizzes q ON q.topic_id = t.id
-                 LEFT JOIN lesson_reviews lr ON lr.lesson_id = l.id AND lr.user_id = ?
-                 GROUP BY s.id, s.name, s.description ORDER BY s.id'
-                , [$user ? (int) $user['id'] : 0]
-            ),
-            'lessons' => $this->all(
-                'SELECT l.id, l.topic_id, s.name AS subject, t.title AS topic, l.title, l.content, l.pdf_original_name
-                 FROM lessons l JOIN topics t ON t.id = l.topic_id JOIN subjects s ON s.id = t.subject_id ORDER BY l.id'
-            ),
-            'quizzes' => $this->all(
-                'SELECT q.id, q.topic_id, q.title, s.name AS subject, t.title AS topic, q.duration_minutes AS time,
-                 COUNT(qq.id) AS questions
-                 FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id
-                 LEFT JOIN quiz_questions qq ON qq.quiz_id = q.id GROUP BY q.id, q.title, s.name, t.title, q.duration_minutes ORDER BY q.id'
-            ),
+            'topics' => json_decode($catalog['topics'], true, 512, JSON_THROW_ON_ERROR),
+            'subjects' => json_decode($catalog['subjects'], true, 512, JSON_THROW_ON_ERROR),
+            'lessons' => json_decode($catalog['lessons'], true, 512, JSON_THROW_ON_ERROR),
+            'quizzes' => json_decode($catalog['quizzes'], true, 512, JSON_THROW_ON_ERROR),
         ];
+        usort($payload['topics'], static function ($a, $b) {
+            return ((int) $a['subject_id'] <=> (int) $b['subject_id'])
+                ?: strcasecmp($a['title'], $b['title']);
+        });
+        foreach (['subjects', 'lessons', 'quizzes'] as $collection) {
+            usort($payload[$collection], static function ($a, $b) {
+                return (int) $a['id'] <=> (int) $b['id'];
+            });
+        }
         foreach ($payload['subjects'] as &$subject) {
             $subject['lessons'] = (int) $subject['lessons'];
             $subject['quizzes'] = (int) $subject['quizzes'];
@@ -80,62 +260,41 @@ class StudyNestLearningApi extends StudyNestApiBase
         }
         unset($quiz);
         if ($user) {
-            $user_id = (int) $user['id'];
-            $payload['sets'] = $this->all(
-                'SELECT ss.id, ss.title, ss.description, ss.created_at, s.name AS subject, t.title AS topic
-                 FROM study_sets ss LEFT JOIN subjects s ON s.id = ss.subject_id LEFT JOIN topics t ON t.id = ss.topic_id
-                 WHERE ss.user_id = ? ORDER BY ss.created_at DESC',
-                [$user_id]
-            );
+            foreach (['sets', 'schedules', 'favorites', 'reviewed_lessons', 'activities', 'weekly_study', 'weak_topics', 'attempts'] as $key) {
+                $payload_key = [
+                    'reviewed_lessons' => 'reviewedLessons',
+                    'weekly_study' => 'weeklyStudy',
+                    'weak_topics' => 'weakTopics',
+                ][$key] ?? $key;
+                $payload[$payload_key] = json_decode($user_data[$key], true, 512, JSON_THROW_ON_ERROR);
+            }
+            $payload['favorites'] = array_map('intval', $payload['favorites']);
+            $payload['reviewedLessons'] = array_map('intval', $payload['reviewedLessons']);
+            $payload['studyTimeSeconds'] = (int) $user_data['study_time_seconds'];
+            usort($payload['sets'], static function ($a, $b) {
+                return strcmp($b['created_at'], $a['created_at']);
+            });
             foreach ($payload['sets'] as &$set) {
-                $set['cards'] = $this->all(
-                    'SELECT id, term_question AS term, answer_definition AS answer FROM flashcards WHERE study_set_id = ? ORDER BY id',
-                    [$set['id']]
-                );
+                usort($set['cards'], static function ($a, $b) {
+                    return (int) $a['id'] <=> (int) $b['id'];
+                });
             }
             unset($set);
-            $payload['schedules'] = $this->all(
-                'SELECT id, title, schedule_date AS date, schedule_time AS time, reminder_note AS note
-                 FROM study_schedules WHERE user_id = ? ORDER BY schedule_date, schedule_time',
-                [$user_id]
-            );
-            $payload['favorites'] = array_map(
-                'intval',
-                array_column($this->all('SELECT lesson_id FROM favorite_lessons WHERE user_id = ?', [$user_id]), 'lesson_id')
-            );
-            $payload['reviewedLessons'] = array_map(
-                'intval',
-                array_column($this->all('SELECT lesson_id FROM lesson_reviews WHERE user_id = ?', [$user_id]), 'lesson_id')
-            );
-            $payload['activities'] = $this->all(
-                'SELECT activity_type AS type, title, details, created_at
-                 FROM user_activities WHERE user_id = ? ORDER BY created_at DESC LIMIT 30',
-                [$user_id]
-            );
-            $payload['studyTimeSeconds'] = (int) ($this->one(
-                'SELECT COALESCE(SUM(duration_seconds), 0) AS total FROM user_activities WHERE user_id = ?',
-                [$user_id]
-            )['total'] ?? 0);
-            $payload['weeklyStudy'] = $this->all(
-                'SELECT DATE(created_at) AS study_date, SUM(duration_seconds) AS duration_seconds
-                 FROM user_activities WHERE user_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
-                 GROUP BY DATE(created_at) ORDER BY study_date',
-                [$user_id]
-            );
-            $payload['weakTopics'] = $this->all(
-                'SELECT t.id, t.title, s.name AS subject, ROUND(AVG(qa.percentage)) AS average_score, COUNT(qa.id) AS attempts
-                 FROM quiz_attempts qa JOIN quizzes q ON q.id = qa.quiz_id JOIN topics t ON t.id = q.topic_id
-                 JOIN subjects s ON s.id = t.subject_id WHERE qa.user_id = ?
-                 GROUP BY t.id, t.title, s.name HAVING AVG(qa.percentage) < 70
-                 ORDER BY average_score ASC LIMIT 5',
-                [$user_id]
-            );
-            $payload['attempts'] = $this->all(
-                'SELECT q.title, s.name AS subject, qa.percentage AS score, qa.completed_at AS date
-                 FROM quiz_attempts qa JOIN quizzes q ON q.id = qa.quiz_id JOIN topics t ON t.id = q.topic_id
-                 JOIN subjects s ON s.id = t.subject_id WHERE qa.user_id = ? ORDER BY qa.completed_at DESC',
-                [$user_id]
-            );
+            usort($payload['schedules'], static function ($a, $b) {
+                return [$a['date'], $a['time']] <=> [$b['date'], $b['time']];
+            });
+            usort($payload['activities'], static function ($a, $b) {
+                return strcmp($b['created_at'], $a['created_at']);
+            });
+            usort($payload['weeklyStudy'], static function ($a, $b) {
+                return strcmp($a['study_date'], $b['study_date']);
+            });
+            usort($payload['weakTopics'], static function ($a, $b) {
+                return (float) $a['average_score'] <=> (float) $b['average_score'];
+            });
+            usort($payload['attempts'], static function ($a, $b) {
+                return strcmp($b['date'], $a['date']);
+            });
         }
         $this->respond($payload);
     }
