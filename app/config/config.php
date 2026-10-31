@@ -399,10 +399,14 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => [],
-        'credentials'     => false,
+        'allowed_origins' => [
+            'https://studynest-r85g.onrender.com',
+            'http://localhost:4173',
+            'http://127.0.0.1:4173',
+        ],
+        'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'headers'         => 'Authorization, Content-Type, X-Requested-With',
+        'headers'         => 'Authorization, Content-Type, X-Requested-With, X-CSRF-Token',
         'max_age'         => 600,
     ],
 ];
