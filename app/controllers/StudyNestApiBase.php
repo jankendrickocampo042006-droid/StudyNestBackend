@@ -5,6 +5,7 @@ class StudyNestApiBase extends Controller
 {
     public function before_action()
     {
+        $this->security_headers->apply_api();
         $this->session = $this->call->library('session');
         $this->ensure_csrf_token();
     }
