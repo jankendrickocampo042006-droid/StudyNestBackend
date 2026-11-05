@@ -267,6 +267,105 @@ class StudyNestAuthApi extends StudyNestApiBase
         ]);
     }
 
+    public function google_login()
+    {
+        $this->verify_csrf();
+        $client_id = trim((string) getenv('GOOGLE_CLIENT_ID'));
+        if ($client_id === '') {
+            $this->fail('Google sign-in is not configured on the backend.', 503);
+        }
+
+        $credential = trim((string) ($this->body()['credential'] ?? ''));
+        if ($credential === '' || strlen($credential) > 16384) {
+            $this->fail('Google sign-in could not be verified. Please try again.', 401);
+        }
+
+        $google = new \Google\Client(['client_id' => $client_id]);
+        $google->setHttpClient(new \GuzzleHttp\Client([
+            'connect_timeout' => 4,
+            'timeout' => 8,
+        ]));
+
+        try {
+            $identity = $google->verifyIdToken($credential);
+        } catch (\UnexpectedValueException | \LogicException $error) {
+            $this->fail('Google sign-in could not be verified. Please try again.', 401);
+        } catch (\Google\Exception | \GuzzleHttp\Exception\GuzzleException $error) {
+            error_log('StudyNest Google sign-in verification error: ' . $error->getMessage());
+            $this->fail('Google sign-in is temporarily unavailable. Please try again.', 503);
+        }
+
+        if (
+            !is_array($identity)
+            || empty($identity['sub'])
+            || empty($identity['email'])
+            || !filter_var($identity['email'], FILTER_VALIDATE_EMAIL)
+            || filter_var($identity['email_verified'] ?? false, FILTER_VALIDATE_BOOLEAN) !== true
+        ) {
+            $this->fail('Google did not provide a verified account. Please try another Google account.', 401);
+        }
+
+        $email = trim((string) $identity['email']);
+        $user = $this->one(
+            "SELECT id, full_name, email, is_active, email_verified_at, teacher_status,
+             CASE
+                 WHEN teacher_status = 'pending' THEN 'teacher_pending'
+                 WHEN teacher_status = 'approved' THEN 'teacher'
+                 ELSE role
+             END AS role
+             FROM users WHERE email = ?",
+            [$email]
+        );
+
+        if ($user && $user['email_verified_at'] === null) {
+            $this->execute(
+                'UPDATE users SET email_verified_at = NOW(), is_active = 1,
+                 email_otp_hash = NULL, email_otp_expires_at = NULL, email_otp_sent_at = NULL,
+                 email_otp_attempts = 0 WHERE id = ?',
+                [(int) $user['id']]
+            );
+            $user['is_active'] = 1;
+        } elseif ($user && (int) $user['is_active'] !== 1) {
+            $this->fail('This StudyNest account is inactive. Please contact an administrator.', 403);
+        }
+
+        if (!$user) {
+            $name = trim((string) ($identity['name'] ?? ''));
+            if ($name === '' || mb_strlen($name) > 100) {
+                $name = strstr($email, '@', true) ?: $email;
+                $name = mb_substr($name, 0, 100);
+            }
+            $username = substr(preg_replace('/[^a-z0-9_]/i', '_', strstr($email, '@', true)), 0, 80)
+                . '_' . bin2hex(random_bytes(6));
+            $id = $this->insert(
+                'INSERT INTO users (username, full_name, email, password, role, email_verified_at, is_active)
+                 VALUES (?, ?, ?, ?, ?, NOW(), 1)',
+                [$username, $name, $email, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), 'user']
+            );
+            $user = [
+                'id' => $id,
+                'full_name' => $name,
+                'email' => $email,
+                'is_active' => 1,
+                'teacher_status' => null,
+                'role' => 'user',
+            ];
+        }
+
+        $this->session->regenerate_on_login();
+        $this->session->set_userdata('studynest_user_id', (int) $user['id']);
+        $this->respond([
+            'user' => [
+                'id' => (int) $user['id'],
+                'name' => $user['full_name'],
+                'email' => $user['email'],
+                'role' => $user['role'],
+                'teacher_status' => $user['teacher_status'],
+            ],
+            'csrf_token' => $this->csrf_token(),
+        ]);
+    }
+
     public function logout()
     {
         $this->verify_csrf();

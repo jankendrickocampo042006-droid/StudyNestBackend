@@ -51,6 +51,7 @@ $router->get('/api/bootstrap', 'StudyNestLearningApi::bootstrap');
 $router->get('/api/auth/session', 'StudyNestAuthApi::session_status');
 $router->post('/api/auth/register', 'StudyNestAuthApi::register');
 $router->post('/api/auth/login', 'StudyNestAuthApi::login');
+$router->post('/api/auth/google', 'StudyNestAuthApi::google_login');
 $router->post('/api/auth/verify-email', 'StudyNestAuthApi::verify_email');
 $router->post('/api/auth/resend-otp', 'StudyNestAuthApi::resend_otp');
 $router->post('/api/auth/forgot-password', 'StudyNestAuthApi::forgot_password');

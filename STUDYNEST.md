@@ -11,14 +11,14 @@ StudyNest keeps the LavaLust PHP API and the Vite/Node.js frontend in separate f
 1. Create/import the `studynest` database by running `database/studynest.sql` in MySQL or phpMyAdmin. The database starts empty; subjects, topics, lessons, and quizzes are created through the content manager.
 2. Copy `.env.example` to `.env` in the project root and set the MySQL credentials. Point Laragon/Apache at this project so its URL is `http://localhost/StudyNest/LavaLust-main`.
 3. Copy `frontend/.env.example` to `frontend/.env`. Update `VITE_API_PROXY_TARGET` if the backend URL differs from the example.
-4. In a backend terminal, install the locked mail dependency:
+4. In a backend terminal, install the locked PHP dependencies:
 
    ```powershell
    cd C:\laragon\www\StudyNest\LavaLust-main
    composer install
    ```
 
-   Configure `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_EMAIL` in `.env` using a Google App Password before testing registration.
+   Configure `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_EMAIL` in `.env` using a Google App Password before testing email verification.
 5. In the VS Code integrated terminal, run:
 
    ```powershell
@@ -31,6 +31,23 @@ StudyNest keeps the LavaLust PHP API and the Vite/Node.js frontend in separate f
 6. For the production frontend, run `npm run build`; serve the generated `frontend/dist/` files using a static web server configured to proxy `/api` to the LavaLust backend.
 
 The frontend always uses the LavaLust API; it has no local demo-data fallback. `VITE_API_PROXY_TARGET` points the Vite development proxy at LavaLust. `VITE_API_BASE_URL` sets the backend origin for a split deployment; leave it empty when the API is served from the same origin. A trailing `/api` is normalized automatically.
+
+## Google sign-in
+
+Google sign-in uses Google Identity Services in the frontend and verifies the returned ID token in the PHP backend. To enable it locally:
+
+1. In Google Cloud Console, create a project, configure the OAuth consent screen as **External**, and add your Google account as a test user if the app is in Testing.
+2. Create an OAuth client ID with application type **Web application**. Add both development origins as **Authorized JavaScript origins**:
+   - `http://localhost:4173`
+   - `http://127.0.0.1:4173`
+   No redirect URI or client secret is needed for this sign-in button.
+3. Copy the OAuth client ID (not a client secret) into both local environment files:
+   - `frontend/.env`: `VITE_GOOGLE_CLIENT_ID=your-client-id`
+   - backend `.env`: `GOOGLE_CLIENT_ID=your-client-id`
+4. Restart the Vite dev server and Apache/PHP after editing environment files.
+5. Open StudyNest using one of the exact origins above and choose **Continue with Google**. A new Google account creates a verified student account. Existing StudyNest accounts with the same verified email sign in with their existing role.
+
+The client ID is public configuration; never put an OAuth client secret in the frontend. The backend verifies the ID token signature, expiry, issuer, and audience before creating a session. Google sign-in confirms the email address, so it does not send the separate StudyNest email-verification OTP.
 
 Email verification and password reset use SMTP through PHPMailer. Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_EMAIL` in the backend `.env` or the Render backend service's Environment settings. `SMTP_TIMEOUT` defaults to 10 seconds. Gmail uses ports 587/465, which Render Free web services block; to keep PHPMailer, use an SMTP relay that supports STARTTLS on a permitted port such as 2525, and verify the sender address/domain with that provider. If using Gmail, upgrade the Render web service to a paid plan that permits SMTP. Never use your normal Gmail password; use a Google App Password. Password reset sends a six-digit code that expires after 10 minutes and is limited to five guesses and five sends per day with a 60-second cooldown.
 
