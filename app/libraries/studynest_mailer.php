@@ -34,6 +34,7 @@ class StudyNest_mailer
             $mail->Password = $password;
             $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
             $mail->Port = (int) config_item('studynest_smtp_port');
+            $mail->Timeout = (int) config_item('studynest_smtp_timeout');
             $mail->CharSet = 'UTF-8';
             $mail->setFrom($from, (string) config_item('studynest_mail_from_name'));
             $mail->addAddress($recipient);
