@@ -30,11 +30,36 @@ StudyNest keeps the LavaLust PHP API and the Vite/Node.js frontend in separate f
    Keep that terminal running and open `http://localhost:4173`. Before starting the frontend, start Apache and MySQL from Laragon and make sure the backend `.env` and frontend `.env` files are configured as above.
 6. For the production frontend, run `npm run build`; serve the generated `frontend/dist/` files using a static web server configured to proxy `/api` to the LavaLust backend.
 
-The frontend always uses the LavaLust API; it has no local demo-data fallback. `VITE_API_PROXY_TARGET` points the Vite development proxy at LavaLust. `VITE_API_BASE_URL` is only for same-origin deployments where the frontend and API share an origin.
+The frontend always uses the LavaLust API; it has no local demo-data fallback. `VITE_API_PROXY_TARGET` points the Vite development proxy at LavaLust. `VITE_API_BASE_URL` sets the backend origin for a split deployment; leave it empty when the API is served from the same origin. A trailing `/api` is normalized automatically.
 
 Email verification and password reset use Gmail SMTP through PHPMailer. Set `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_EMAIL` in the backend `.env`. Use a Google App Password, not your usual Gmail password. Password reset sends a six-digit code that expires after 10 minutes and is limited to five guesses and five sends per day with a 60-second cooldown.
 
 The SQL import is the simplest setup path. LavaLust migrations are disabled by default in `app/config/migration.php`. Migration `003_create_studynest_tables.php` creates the StudyNest schema; migration `004_create_user_activities.php` adds the activity table for existing installations.
+
+Subjects belong to the teacher who creates them; their topics, lessons, and quizzes inherit that ownership. Teachers can only view/manage their own content, while admins and moderators can manage all content and the student catalog remains shared. Admins can view approved teacher accounts and registered student accounts in their workspace. For existing databases, apply migration `010_subject_ownership.php` before deploying these API changes. It also assigns old subjects from matching subject-creation activity records when available; any remaining unassigned subjects are admin-managed until assigned.
+
+If applying the ownership migration manually to an existing MySQL database, run the schema update once. The backfill query requires the `user_activities` table from migration `004`; omit that query if the table is not present.
+
+```sql
+ALTER TABLE subjects
+    ADD COLUMN owner_id INT UNSIGNED NULL AFTER description,
+    ADD INDEX subjects_owner_idx (owner_id),
+    ADD CONSTRAINT subjects_owner_fk
+        FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL;
+
+UPDATE subjects s
+JOIN (
+    SELECT title, MAX(id) AS activity_id
+    FROM user_activities
+    WHERE activity_type = 'content_created' AND details = 'Subject'
+    GROUP BY title
+) latest ON latest.title = s.name
+JOIN user_activities activity ON activity.id = latest.activity_id
+SET s.owner_id = activity.user_id
+WHERE s.owner_id IS NULL;
+```
+
+Subjects without a matching creation activity remain unassigned. An admin can assign one by setting `subjects.owner_id` to the owning teacher's user ID.
 
 ## Add content
 

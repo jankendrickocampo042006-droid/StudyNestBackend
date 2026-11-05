@@ -75,6 +75,7 @@ $router->post('/api/quizzes/{id}/attempts', 'StudyNestLearningApi::submit_quiz')
 $router->get('/api/manage', 'StudyNestManageApi::manage');
 $router->get('/api/manage/teachers', 'StudyNestManageApi::manage_teachers');
 $router->post('/api/manage/teachers', 'StudyNestManageApi::manage_teachers');
+$router->get('/api/manage/students', 'StudyNestManageApi::manage_students');
 $router->get('/api/manage/teacher-applications', 'StudyNestManageApi::manage_teacher_applications');
 $router->put('/api/manage/teacher-applications/{id}', 'StudyNestManageApi::manage_teacher_application');
 $router->get('/api/manage/teacher-applications/{id}/photo', 'StudyNestManageApi::teacher_application_photo');

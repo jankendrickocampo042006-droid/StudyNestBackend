@@ -5,32 +5,99 @@ require_once __DIR__ . '/StudyNestApiBase.php';
 
 class StudyNestManageApi extends StudyNestApiBase
 {
+    private function content_manager()
+    {
+        $user = $this->current_user();
+        if (!$user) {
+            $this->fail('Please sign in to continue.', 401);
+        }
+        if (!in_array($user['role'], ['admin', 'moderator', 'teacher'], true)) {
+            $this->fail('Only an administrator or teacher can manage learning content.', 403);
+        }
+        return $user;
+    }
+
+    private function assert_subject_access($subject_id, array $manager)
+    {
+        $subject = $this->one('SELECT id, owner_id FROM subjects WHERE id = ?', [(int) $subject_id]);
+        if (!$subject || ($manager['role'] === 'teacher' && (int) ($subject['owner_id'] ?? 0) !== (int) $manager['id'])) {
+            $this->fail('Subject not found.', 404);
+        }
+        return $subject;
+    }
+
+    private function assert_topic_access($topic_id, array $manager)
+    {
+        $topic = $this->one(
+            'SELECT t.id, t.subject_id, s.owner_id
+             FROM topics t JOIN subjects s ON s.id = t.subject_id
+             WHERE t.id = ?',
+            [(int) $topic_id]
+        );
+        if (!$topic || ($manager['role'] === 'teacher' && (int) ($topic['owner_id'] ?? 0) !== (int) $manager['id'])) {
+            $this->fail('Topic not found.', 404);
+        }
+        return $topic;
+    }
+
+    private function assert_catalog_access($kind, $id, array $manager)
+    {
+        $queries = [
+            'subjects' => 'SELECT id, owner_id FROM subjects WHERE id = ?',
+            'topics' => 'SELECT t.id, s.owner_id FROM topics t JOIN subjects s ON s.id = t.subject_id WHERE t.id = ?',
+            'lessons' => 'SELECT l.id, l.pdf_storage_name, s.owner_id FROM lessons l JOIN topics t ON t.id = l.topic_id JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
+            'quizzes' => 'SELECT q.id, q.title, s.owner_id FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
+        ];
+        $item = $this->one($queries[$kind], [(int) $id]);
+        if (!$item || ($manager['role'] === 'teacher' && (int) ($item['owner_id'] ?? 0) !== (int) $manager['id'])) {
+            $this->fail('Content not found.', 404);
+        }
+        return $item;
+    }
+
     public function manage()
     {
-        $this->require_admin();
+        $manager = $this->content_manager();
+        $teacher_scope = $manager['role'] === 'teacher';
+        $subject_filter = $teacher_scope ? ' WHERE s.owner_id = ?' : '';
+        $scope_values = $teacher_scope ? [(int) $manager['id']] : [];
         $quizzes = $this->all(
             'SELECT q.id, q.topic_id, q.title, q.duration_minutes AS time, t.title AS topic, s.name AS subject
-             FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id ORDER BY q.id'
+             FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id' .
+             $subject_filter . ' ORDER BY q.id',
+            $scope_values
         );
+        $questions_by_quiz = [];
+        foreach ($this->all(
+            'SELECT qq.quiz_id, qq.id, qq.question_text AS question, qq.type, qq.option_a, qq.option_b, qq.option_c, qq.option_d, qq.correct_option, qq.explanation
+             FROM quiz_questions qq JOIN quizzes q ON q.id = qq.quiz_id
+             JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id' .
+             $subject_filter . ' ORDER BY qq.quiz_id, qq.id',
+            $scope_values
+        ) as $question) {
+            $questions_by_quiz[$question['quiz_id']][] = $question;
+        }
         foreach ($quizzes as &$quiz) {
-            $quiz['questions'] = $this->all(
-                'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d, correct_option, explanation
-                 FROM quiz_questions WHERE quiz_id = ? ORDER BY id',
-                [$quiz['id']]
-            );
+            $quiz['questions'] = $questions_by_quiz[$quiz['id']] ?? [];
         }
         unset($quiz);
         $this->respond([
             'topics' => $this->all(
                 'SELECT t.id, t.subject_id, t.title, t.summary, s.name AS subject
-                 FROM topics t JOIN subjects s ON s.id = t.subject_id ORDER BY s.name, t.title'
+                 FROM topics t JOIN subjects s ON s.id = t.subject_id' .
+                 $subject_filter . ' ORDER BY s.name, t.title',
+                $scope_values
             ),
             'subjects' => $this->all(
-                'SELECT id, name, description FROM subjects ORDER BY name'
+                'SELECT id, name, description FROM subjects' .
+                ($teacher_scope ? ' WHERE owner_id = ?' : '') . ' ORDER BY name',
+                $scope_values
             ),
             'lessons' => $this->all(
                 'SELECT l.id, l.topic_id, l.title, l.content, l.pdf_original_name, t.title AS topic, s.name AS subject
-                 FROM lessons l JOIN topics t ON t.id = l.topic_id JOIN subjects s ON s.id = t.subject_id ORDER BY l.title'
+                 FROM lessons l JOIN topics t ON t.id = l.topic_id JOIN subjects s ON s.id = t.subject_id' .
+                 $subject_filter . ' ORDER BY l.title',
+                $scope_values
             ),
             'quizzes' => $quizzes,
         ]);
@@ -42,7 +109,10 @@ class StudyNestManageApi extends StudyNestApiBase
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $this->respond($this->all(
                 "SELECT id, full_name AS name, email, teacher_id, created_at
-                 FROM users WHERE role = 'teacher' ORDER BY full_name, id"
+                 FROM users
+                 WHERE is_active = 1
+                   AND (teacher_status = 'approved' OR (role = 'teacher' AND teacher_status IS NULL))
+                 ORDER BY full_name, id"
             ));
         }
 
@@ -67,6 +137,17 @@ class StudyNestManageApi extends StudyNestApiBase
             [$username, $name, $email, password_hash($password, PASSWORD_DEFAULT), 'teacher']
         );
         $this->respond(['id' => $id, 'name' => $name, 'email' => $email, 'role' => 'teacher'], 201);
+    }
+
+    public function manage_students()
+    {
+        $this->require_super_admin();
+        $this->respond($this->all(
+            "SELECT id, full_name AS name, email, created_at, is_active, email_verified_at
+             FROM users
+             WHERE role = 'user' AND (teacher_status IS NULL OR teacher_status = 'rejected')
+             ORDER BY created_at DESC, id DESC"
+        ));
     }
 
     public function manage_teacher_applications()
@@ -173,7 +254,7 @@ class StudyNestManageApi extends StudyNestApiBase
         return $config[$kind];
     }
 
-    private function validate_catalog($kind, array $data)
+    private function validate_catalog($kind, array $data, array $manager)
     {
         $config = $this->catalog_config($kind);
         $values = [];
@@ -194,11 +275,11 @@ class StudyNestManageApi extends StudyNestApiBase
             }
             $values[$field] = $value;
         }
-        if ($kind === 'topics' && !$this->one('SELECT id FROM subjects WHERE id = ?', [$values['subject_id']])) {
-            $this->fail('Subject not found.', 404);
+        if ($kind === 'topics') {
+            $this->assert_subject_access($values['subject_id'], $manager);
         }
-        if ($kind === 'lessons' && !$this->one('SELECT id FROM topics WHERE id = ?', [$values['topic_id']])) {
-            $this->fail('Topic not found.', 404);
+        if ($kind === 'lessons') {
+            $this->assert_topic_access($values['topic_id'], $manager);
         }
         return [$config, $values];
     }
@@ -235,21 +316,44 @@ class StudyNestManageApi extends StudyNestApiBase
 
     public function catalog($kind)
     {
-        $user_id = $this->require_admin();
+        $manager = $this->content_manager();
+        $user_id = (int) $manager['id'];
+        $teacher_scope = $manager['role'] === 'teacher';
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $config = $this->catalog_config($kind);
             if ($kind === 'lessons') {
                 $this->respond($this->all(
-                    'SELECT id, topic_id, title, content, pdf_original_name FROM lessons ORDER BY id DESC'
+                    'SELECT l.id, l.topic_id, l.title, l.content, l.pdf_original_name
+                     FROM lessons l JOIN topics t ON t.id = l.topic_id
+                     JOIN subjects s ON s.id = t.subject_id' .
+                     ($teacher_scope ? ' WHERE s.owner_id = ?' : '') . ' ORDER BY l.id DESC',
+                    $teacher_scope ? [$user_id] : []
                 ));
             }
-            $this->respond($this->all('SELECT * FROM ' . $config['table'] . ' ORDER BY id DESC'));
+            if ($kind === 'subjects') {
+                $this->respond($this->all(
+                    'SELECT id, name, description FROM subjects' .
+                    ($teacher_scope ? ' WHERE owner_id = ?' : '') . ' ORDER BY id DESC',
+                    $teacher_scope ? [$user_id] : []
+                ));
+            }
+            if ($kind === 'topics') {
+                $this->respond($this->all(
+                    'SELECT t.* FROM topics t JOIN subjects s ON s.id = t.subject_id' .
+                    ($teacher_scope ? ' WHERE s.owner_id = ?' : '') . ' ORDER BY t.id DESC',
+                    $teacher_scope ? [$user_id] : []
+                ));
+            }
+            $this->fail('Unknown content type.', 404);
         }
         $this->verify_csrf();
         $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false
             ? $_POST
             : $this->body();
-        [$config, $values] = $this->validate_catalog($kind, $data);
+        [$config, $values] = $this->validate_catalog($kind, $data, $manager);
+        if ($kind === 'subjects') {
+            $values['owner_id'] = $user_id;
+        }
         $pdf = $kind === 'lessons' ? $this->save_lesson_pdf() : null;
         if ($pdf) {
             $values['pdf_storage_name'] = $pdf['storage_name'];
@@ -275,17 +379,11 @@ class StudyNestManageApi extends StudyNestApiBase
 
     public function catalog_item($kind, $id)
     {
-        $user_id = $this->require_admin();
+        $manager = $this->content_manager();
+        $user_id = (int) $manager['id'];
         $config = $this->catalog_config($kind);
         $id = (int) $id;
-        $existing = $this->one(
-            'SELECT id' . ($kind === 'lessons' ? ', pdf_storage_name' : '') .
-            ' FROM ' . $config['table'] . ' WHERE id = ?',
-            [$id]
-        );
-        if (!$existing) {
-            $this->fail('Content not found.', 404);
-        }
+        $existing = $this->assert_catalog_access($kind, $id, $manager);
         $this->verify_csrf();
         if ($_SERVER['REQUEST_METHOD'] === 'DELETE') {
             $this->execute('DELETE FROM ' . $config['table'] . ' WHERE id = ?', [$id]);
@@ -298,7 +396,7 @@ class StudyNestManageApi extends StudyNestApiBase
         $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false
             ? $_POST
             : $this->body();
-        [$config, $values] = $this->validate_catalog($kind, $data);
+        [$config, $values] = $this->validate_catalog($kind, $data, $manager);
         $pdf = $kind === 'lessons' ? $this->save_lesson_pdf() : null;
         $remove_pdf = $kind === 'lessons' && ($data['remove_pdf_attachment'] ?? '') === '1';
         if ($pdf) {
@@ -328,15 +426,16 @@ class StudyNestManageApi extends StudyNestApiBase
         $this->respond(array_merge(['id' => $id], $values));
     }
 
-    private function quiz_data(array $data)
+    private function quiz_data(array $data, array $manager)
     {
         $title = $this->catalog_text($data, 'title', 'Quiz title', 180);
         $topic_id = (int) ($data['topic_id'] ?? 0);
         $duration = (int) ($data['duration_minutes'] ?? 0);
         $questions = $data['questions'] ?? null;
-        if (!$topic_id || !$this->one('SELECT id FROM topics WHERE id = ?', [$topic_id])) {
+        if (!$topic_id) {
             $this->fail('Choose a valid topic.');
         }
+        $this->assert_topic_access($topic_id, $manager);
         if ($duration < 1 || $duration > 600) {
             $this->fail('Quiz duration must be between 1 and 600 minutes.');
         }
@@ -386,12 +485,19 @@ class StudyNestManageApi extends StudyNestApiBase
 
     public function manage_quizzes()
     {
-        $user_id = $this->require_admin();
+        $manager = $this->content_manager();
+        $user_id = (int) $manager['id'];
         if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-            $this->respond($this->all('SELECT id, topic_id, title, duration_minutes FROM quizzes ORDER BY id DESC'));
+            $this->respond($this->all(
+                'SELECT q.id, q.topic_id, q.title, q.duration_minutes
+                 FROM quizzes q JOIN topics t ON t.id = q.topic_id
+                 JOIN subjects s ON s.id = t.subject_id' .
+                 ($manager['role'] === 'teacher' ? ' WHERE s.owner_id = ?' : '') . ' ORDER BY q.id DESC',
+                $manager['role'] === 'teacher' ? [$user_id] : []
+            ));
         }
         $this->verify_csrf();
-        [$title, $topic_id, $duration, $questions] = $this->quiz_data($this->body());
+        [$title, $topic_id, $duration, $questions] = $this->quiz_data($this->body(), $manager);
         $db = $this->db();
         $db->raw('START TRANSACTION');
         try {
@@ -411,19 +517,17 @@ class StudyNestManageApi extends StudyNestApiBase
 
     public function manage_quiz($id)
     {
-        $user_id = $this->require_admin();
+        $manager = $this->content_manager();
+        $user_id = (int) $manager['id'];
         $id = (int) $id;
-        $quiz = $this->one('SELECT id, title FROM quizzes WHERE id = ?', [$id]);
-        if (!$quiz) {
-            $this->fail('Quiz not found.', 404);
-        }
+        $quiz = $this->assert_catalog_access('quizzes', $id, $manager);
         $this->verify_csrf();
         if ($_SERVER['REQUEST_METHOD'] === 'DELETE') {
             $this->execute('DELETE FROM quizzes WHERE id = ?', [$id]);
             $this->activity($user_id, 'content_deleted', $quiz['title'], 'Quiz');
             $this->respond(['ok' => true]);
         }
-        [$title, $topic_id, $duration, $questions] = $this->quiz_data($this->body());
+        [$title, $topic_id, $duration, $questions] = $this->quiz_data($this->body(), $manager);
         $db = $this->db();
         $db->raw('START TRANSACTION');
         try {

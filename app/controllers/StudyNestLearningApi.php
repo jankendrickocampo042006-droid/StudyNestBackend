@@ -5,9 +5,18 @@ require_once __DIR__ . '/StudyNestApiBase.php';
 
 class StudyNestLearningApi extends StudyNestApiBase
 {
+    private function assert_teacher_subject_owner($owner_id)
+    {
+        $user = $this->current_user();
+        if ($user && $user['role'] === 'teacher' && (int) ($owner_id ?? 0) !== (int) $user['id']) {
+            $this->fail('Content not found.', 404);
+        }
+    }
+
     public function bootstrap()
     {
         $user = $this->current_user();
+        $teacher_scope = $user && $user['role'] === 'teacher';
         $catalog = $this->one(<<<'SQL'
             SELECT
                 (
@@ -18,6 +27,8 @@ class StudyNestLearningApi extends StudyNestApiBase
                         'summary', t.summary
                     )), JSON_ARRAY())
                     FROM topics t
+                    JOIN subjects s ON s.id = t.subject_id
+                    WHERE (? = 0 OR s.owner_id = ?)
                 ) AS topics,
                 (
                     SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
@@ -43,6 +54,7 @@ class StudyNestLearningApi extends StudyNestApiBase
                         LEFT JOIN quizzes q ON q.topic_id = t.id
                         GROUP BY t.subject_id
                     ) qc ON qc.subject_id = s.id
+                    WHERE (? = 0 OR s.owner_id = ?)
                 ) AS subjects,
                 (
                     SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
@@ -57,6 +69,7 @@ class StudyNestLearningApi extends StudyNestApiBase
                     FROM lessons l
                     JOIN topics t ON t.id = l.topic_id
                     JOIN subjects s ON s.id = t.subject_id
+                    WHERE (? = 0 OR s.owner_id = ?)
                 ) AS lessons,
                 (
                     SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
@@ -76,8 +89,19 @@ class StudyNestLearningApi extends StudyNestApiBase
                         FROM quiz_questions
                         GROUP BY quiz_id
                     ) qc ON qc.quiz_id = q.id
+                    WHERE (? = 0 OR s.owner_id = ?)
                 ) AS quizzes
-            SQL, [$user ? (int) $user['id'] : 0]);
+            SQL, [
+                $teacher_scope ? 1 : 0,
+                $user ? (int) $user['id'] : 0,
+                $user ? (int) $user['id'] : 0,
+                $teacher_scope ? 1 : 0,
+                $user ? (int) $user['id'] : 0,
+                $teacher_scope ? 1 : 0,
+                $user ? (int) $user['id'] : 0,
+                $teacher_scope ? 1 : 0,
+                $user ? (int) $user['id'] : 0,
+            ]);
         $user_data = null;
         if ($user) {
             $user_id = (int) $user['id'];
@@ -296,6 +320,69 @@ class StudyNestLearningApi extends StudyNestApiBase
                 return strcmp($b['date'], $a['date']);
             });
         }
+        if ($user && in_array($user['role'], ['admin', 'moderator', 'teacher'], true)) {
+            $subject_filter = $teacher_scope ? ' WHERE s.owner_id = ?' : '';
+            $scope_values = $teacher_scope ? [(int) $user['id']] : [];
+            $management_quizzes = $this->all(
+                'SELECT q.id, q.topic_id, q.title, q.duration_minutes AS time, t.title AS topic, s.name AS subject
+                 FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id' .
+                 $subject_filter . ' ORDER BY q.id',
+                $scope_values
+            );
+            $questions_by_quiz = [];
+            foreach ($this->all(
+                'SELECT qq.quiz_id, qq.id, qq.question_text AS question, qq.type, qq.option_a, qq.option_b, qq.option_c, qq.option_d, qq.correct_option, qq.explanation
+                 FROM quiz_questions qq JOIN quizzes q ON q.id = qq.quiz_id
+                 JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id' .
+                 $subject_filter . ' ORDER BY qq.quiz_id, qq.id',
+                $scope_values
+            ) as $question) {
+                $questions_by_quiz[$question['quiz_id']][] = $question;
+            }
+            foreach ($management_quizzes as &$quiz) {
+                $quiz['id'] = (int) $quiz['id'];
+                $quiz['topic_id'] = (int) $quiz['topic_id'];
+                $quiz['time'] = (int) $quiz['time'];
+                $quiz['questions'] = $questions_by_quiz[$quiz['id']] ?? [];
+            }
+            unset($quiz);
+            $subject_names = [];
+            foreach ($payload['subjects'] as $subject) {
+                $subject_names[$subject['id']] = $subject['name'];
+            }
+            $management_topics = $payload['topics'];
+            foreach ($management_topics as &$topic) {
+                $topic['subject'] = $subject_names[$topic['subject_id']] ?? '';
+            }
+            unset($topic);
+            $payload['management'] = [
+                'subjects' => $payload['subjects'],
+                'topics' => $management_topics,
+                'lessons' => $payload['lessons'],
+                'quizzes' => $management_quizzes,
+            ];
+        }
+        if ($user && $user['role'] === 'admin') {
+            $payload['teachers'] = $this->all(
+                "SELECT id, full_name AS name, email, teacher_id, created_at
+                 FROM users
+                 WHERE is_active = 1
+                   AND (teacher_status = 'approved' OR (role = 'teacher' AND teacher_status IS NULL))
+                 ORDER BY full_name, id"
+            );
+            $payload['teacherApplications'] = $this->all(
+                "SELECT id, full_name AS name, email, teacher_id_photo, created_at
+                 FROM users
+                 WHERE teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1
+                 ORDER BY created_at, id"
+            );
+            $payload['students'] = $this->all(
+                "SELECT id, full_name AS name, email, created_at, is_active, email_verified_at
+                 FROM users
+                 WHERE role = 'user' AND (teacher_status IS NULL OR teacher_status = 'rejected')
+                 ORDER BY created_at DESC, id DESC"
+            );
+        }
         $this->respond($payload);
     }
 
@@ -303,12 +390,15 @@ class StudyNestLearningApi extends StudyNestApiBase
     {
         $this->user_id();
         $lesson = $this->one(
-            'SELECT pdf_storage_name, pdf_original_name FROM lessons WHERE id = ?',
+            'SELECT l.pdf_storage_name, l.pdf_original_name, s.owner_id
+             FROM lessons l JOIN topics t ON t.id = l.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
             [(int) $id]
         );
         if (!$lesson || !$lesson['pdf_storage_name']) {
             $this->fail('This lesson does not have an attached PDF.', 404);
         }
+        $this->assert_teacher_subject_owner($lesson['owner_id']);
         $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'lesson-pdfs';
         $path = $directory . DIRECTORY_SEPARATOR . basename($lesson['pdf_storage_name']);
         if (!is_file($path) || (new finfo(FILEINFO_MIME_TYPE))->file($path) !== 'application/pdf') {
@@ -505,9 +595,15 @@ class StudyNestLearningApi extends StudyNestApiBase
     {
         $user_id = $this->user_id();
         $this->verify_csrf();
-        if (!$this->one('SELECT id FROM lessons WHERE id = ?', [(int) $lesson_id])) {
+        $lesson = $this->one(
+            'SELECT l.id, s.owner_id FROM lessons l JOIN topics t ON t.id = l.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
+            [(int) $lesson_id]
+        );
+        if (!$lesson) {
             $this->fail('Lesson not found.', 404);
         }
+        $this->assert_teacher_subject_owner($lesson['owner_id']);
         $this->execute(
             'INSERT INTO lesson_reviews (user_id, lesson_id, reviewed_at) VALUES (?, ?, NOW())
              ON DUPLICATE KEY UPDATE reviewed_at = NOW()',
@@ -620,13 +716,15 @@ class StudyNestLearningApi extends StudyNestApiBase
     {
         $this->user_id();
         $quiz = $this->one(
-            'SELECT q.id, q.title, s.name AS subject, t.title AS topic, q.duration_minutes AS time
+            'SELECT q.id, q.title, s.name AS subject, t.title AS topic, q.duration_minutes AS time, s.owner_id
              FROM quizzes q JOIN topics t ON t.id = q.topic_id JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
             [(int) $id]
         );
         if (!$quiz) {
             $this->fail('Quiz not found.', 404);
         }
+        $this->assert_teacher_subject_owner($quiz['owner_id']);
+        unset($quiz['owner_id']);
         $quiz['questions'] = $this->all(
             'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d
              FROM quiz_questions WHERE quiz_id = ? ORDER BY id',
@@ -649,9 +747,15 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $quiz_id = (int) $id;
-        if (!$this->one('SELECT id FROM quizzes WHERE id = ?', [$quiz_id])) {
+        $quiz = $this->one(
+            'SELECT q.id, s.owner_id FROM quizzes q JOIN topics t ON t.id = q.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
+            [$quiz_id]
+        );
+        if (!$quiz) {
             $this->fail('Quiz not found.', 404);
         }
+        $this->assert_teacher_subject_owner($quiz['owner_id']);
         $questions = $this->all(
             'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d, correct_option, explanation
              FROM quiz_questions WHERE quiz_id = ? ORDER BY id',

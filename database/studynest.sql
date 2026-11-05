@@ -34,7 +34,10 @@ CREATE TABLE users (
 CREATE TABLE subjects (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(150) NOT NULL UNIQUE,
-    description TEXT NULL
+    description TEXT NULL,
+    owner_id INT UNSIGNED NULL,
+    INDEX subjects_owner_idx (owner_id),
+    CONSTRAINT subjects_owner_fk FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE topics (

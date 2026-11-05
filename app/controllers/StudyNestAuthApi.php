@@ -227,7 +227,11 @@ class StudyNestAuthApi extends StudyNestApiBase
         $password = (string) ($data['password'] ?? '');
         $user = $this->one(
             "SELECT id, full_name, email, password, is_active, email_verified_at, teacher_status,
-             CASE WHEN teacher_status = 'pending' THEN 'teacher_pending' ELSE role END AS role
+             CASE
+                 WHEN teacher_status = 'pending' THEN 'teacher_pending'
+                 WHEN teacher_status = 'approved' THEN 'teacher'
+                 ELSE role
+             END AS role
              FROM users WHERE email = ?",
             [$email]
         );

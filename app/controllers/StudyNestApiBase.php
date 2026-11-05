@@ -231,7 +231,11 @@ class StudyNestApiBase extends Controller
         }
         $user = $this->one(
             "SELECT id, full_name, email, is_active,
-             CASE WHEN teacher_status = 'pending' THEN 'teacher_pending' ELSE role END AS role,
+             CASE
+                 WHEN teacher_status = 'pending' THEN 'teacher_pending'
+                 WHEN teacher_status = 'approved' THEN 'teacher'
+                 ELSE role
+             END AS role,
              teacher_id, teacher_status
              FROM users WHERE id = ?",
             [$id]

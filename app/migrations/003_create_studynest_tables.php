@@ -24,6 +24,7 @@ class Create_studynest_tables
                 id INT UNSIGNED NOT NULL AUTO_INCREMENT,
                 name VARCHAR(150) NOT NULL UNIQUE,
                 description TEXT NULL,
+                owner_id INT UNSIGNED NULL,
                 PRIMARY KEY (id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
             'topics' => 'CREATE TABLE IF NOT EXISTS topics (
