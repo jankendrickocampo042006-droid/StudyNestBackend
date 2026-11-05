@@ -209,74 +209,77 @@ class StudyNestManageApi extends StudyNestApiBase
 
     public function manage_teacher_application($id)
     {
+        $admin_id = $this->require_super_admin();
+        $id = (int) $id;
+        $application = $this->one(
+            "SELECT id, full_name AS name, email, teacher_id, created_at, is_active, email_verified_at,
+                    teacher_id_photo, teacher_id_photo_data IS NOT NULL AS teacher_id_photo_stored
+             FROM users
+             WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
+            [$id]
+        );
+        if (!$application) {
+            $this->fail('Pending teacher application not found.', 404);
+        }
+
+        $this->verify_csrf();
+        $data = $this->body();
+        $decision = $data['decision'] ?? '';
+        if (!in_array($decision, ['approve', 'reject'], true)) {
+            $this->fail('Choose whether to approve or reject this application.');
+        }
+        if ($decision === 'approve') {
+            $legacy_path = '';
+            if ($application['teacher_id_photo']) {
+                $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
+                $legacy_path = $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo']);
+            }
+            if ((int) $application['teacher_id_photo_stored'] !== 1 && ($legacy_path === '' || !is_file($legacy_path))) {
+                $this->fail('This application has no available teacher ID photo and cannot be approved. Ask the applicant to upload it again.', 422);
+            }
+        }
+
+        $approved = $decision === 'approve';
+        $reviewed_at = $this->one("SHOW COLUMNS FROM users LIKE 'teacher_reviewed_at'");
+        $review_timestamp_sql = $reviewed_at ? ', teacher_reviewed_at = NOW()' : '';
+        if (!$reviewed_at) {
+            error_log('StudyNest teacher review: users.teacher_reviewed_at is missing; apply migration 012_repair_teacher_application_schema.php.');
+        }
         try {
-            $admin_id = $this->require_super_admin();
-            $id = (int) $id;
-            $application = $this->one(
-                "SELECT id, full_name AS name, email, teacher_id, created_at, is_active, email_verified_at,
-                        teacher_id_photo, teacher_id_photo_data IS NOT NULL AS teacher_id_photo_stored
-                 FROM users
-                 WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
-                [$id]
-            );
-            if (!$application) {
-                $this->fail('Pending teacher application not found.', 404);
-            }
-
-            $this->verify_csrf();
-            $data = $this->body();
-            $decision = $data['decision'] ?? '';
-            if (!in_array($decision, ['approve', 'reject'], true)) {
-                $this->fail('Choose whether to approve or reject this application.');
-            }
-            if ($decision === 'approve') {
-                $legacy_path = '';
-                if ($application['teacher_id_photo']) {
-                    $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
-                    $legacy_path = $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo']);
-                }
-                if ((int) $application['teacher_id_photo_stored'] !== 1 && ($legacy_path === '' || !is_file($legacy_path))) {
-                    $this->fail('This application has no available teacher ID photo and cannot be approved. Ask the applicant to upload it again.', 422);
-                }
-            }
-
-            $approved = $decision === 'approve';
             $updated = $this->execute(
-                "UPDATE users SET role = ?, teacher_status = ?, teacher_reviewed_at = NOW()
+                "UPDATE users SET role = ?, teacher_status = ?" . $review_timestamp_sql . "
                  WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
                 [$approved ? 'teacher' : 'user', $approved ? 'approved' : 'rejected', $id]
             );
-            if (!$updated) {
-                $this->fail('This teacher application was already reviewed.', 409);
-            }
-            $this->activity(
-                $admin_id,
-                $approved ? 'teacher_application_approved' : 'teacher_application_rejected',
-                $application['name'],
-                'Teacher account request'
-            );
-            $account = [
-                'id' => (int) $application['id'],
-                'name' => $application['name'],
-                'email' => $application['email'],
-                'teacher_id' => $application['teacher_id'],
-                'created_at' => $application['created_at'],
-            ];
-            if (!$approved) {
-                $account['is_active'] = (int) $application['is_active'];
-                $account['email_verified_at'] = $application['email_verified_at'];
-            }
-            $this->respond(['ok' => true, 'decision' => $decision, 'account' => $account]);
         } catch (Throwable $error) {
             error_log(sprintf(
-                'StudyNest teacher application review failed: %s: %s at %s:%d',
+                'StudyNest teacher review update failed: %s: %s',
                 get_class($error),
-                $error->getMessage(),
-                $error->getFile(),
-                $error->getLine()
+                $error->getMessage()
             ));
             throw $error;
         }
+        if (!$updated) {
+            $this->fail('This teacher application was already reviewed.', 409);
+        }
+        $this->activity(
+            $admin_id,
+            $approved ? 'teacher_application_approved' : 'teacher_application_rejected',
+            $application['name'],
+            'Teacher account request'
+        );
+        $account = [
+            'id' => (int) $application['id'],
+            'name' => $application['name'],
+            'email' => $application['email'],
+            'teacher_id' => $application['teacher_id'],
+            'created_at' => $application['created_at'],
+        ];
+        if (!$approved) {
+            $account['is_active'] = (int) $application['is_active'];
+            $account['email_verified_at'] = $application['email_verified_at'];
+        }
+        $this->respond(['ok' => true, 'decision' => $decision, 'account' => $account]);
     }
 
     private function catalog_config($kind)
