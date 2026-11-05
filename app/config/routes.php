@@ -48,6 +48,7 @@ $router->get('/', 'Welcome::index');
 
 $router->get('/api/health', 'StudyNestAuthApi::health');
 $router->get('/api/bootstrap', 'StudyNestLearningApi::bootstrap');
+$router->get('/api/auth/session', 'StudyNestAuthApi::session_status');
 $router->post('/api/auth/register', 'StudyNestAuthApi::register');
 $router->post('/api/auth/login', 'StudyNestAuthApi::login');
 $router->post('/api/auth/verify-email', 'StudyNestAuthApi::verify_email');

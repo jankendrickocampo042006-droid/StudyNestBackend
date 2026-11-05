@@ -10,6 +10,14 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->respond(['status' => 'ok', 'app' => 'StudyNest']);
     }
 
+    public function session_status()
+    {
+        $this->respond([
+            'csrf_token' => $this->csrf_token(),
+            'authenticated' => (int) ($this->session->userdata('studynest_user_id') ?? 0) > 0,
+        ]);
+    }
+
     public function register()
     {
         $this->verify_csrf();

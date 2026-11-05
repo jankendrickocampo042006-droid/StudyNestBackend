@@ -102,8 +102,9 @@ class StudyNestLearningApi extends StudyNestApiBase
                 $teacher_scope ? 1 : 0,
                 $user ? (int) $user['id'] : 0,
             ]);
+        $needs_learning_data = $user && !in_array($user['role'], ['admin', 'moderator', 'teacher'], true);
         $user_data = null;
-        if ($user) {
+        if ($needs_learning_data) {
             $user_id = (int) $user['id'];
             $user_data = $this->one(<<<'SQL'
                 SELECT
@@ -283,7 +284,7 @@ class StudyNestLearningApi extends StudyNestApiBase
             $quiz['score'] = null;
         }
         unset($quiz);
-        if ($user) {
+        if ($needs_learning_data) {
             foreach (['sets', 'schedules', 'favorites', 'reviewed_lessons', 'activities', 'weekly_study', 'weak_topics', 'attempts'] as $key) {
                 $payload_key = [
                     'reviewed_lessons' => 'reviewedLessons',

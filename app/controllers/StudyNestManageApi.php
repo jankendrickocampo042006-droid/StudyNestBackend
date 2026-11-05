@@ -193,7 +193,7 @@ class StudyNestManageApi extends StudyNestApiBase
         $admin_id = $this->require_super_admin();
         $id = (int) $id;
         $application = $this->one(
-            "SELECT id, full_name AS name, teacher_id_photo FROM users
+            "SELECT id, full_name AS name, email, teacher_id, created_at, is_active, email_verified_at, teacher_id_photo FROM users
              WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
             [$id]
         );
@@ -226,7 +226,18 @@ class StudyNestManageApi extends StudyNestApiBase
             $application['name'],
             'Teacher account request'
         );
-        $this->respond(['ok' => true, 'decision' => $decision]);
+        $account = [
+            'id' => (int) $application['id'],
+            'name' => $application['name'],
+            'email' => $application['email'],
+            'teacher_id' => $application['teacher_id'],
+            'created_at' => $application['created_at'],
+        ];
+        if (!$approved) {
+            $account['is_active'] = (int) $application['is_active'];
+            $account['email_verified_at'] = $application['email_verified_at'];
+        }
+        $this->respond(['ok' => true, 'decision' => $decision, 'account' => $account]);
     }
 
     private function catalog_config($kind)
