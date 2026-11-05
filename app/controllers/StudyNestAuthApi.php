@@ -21,66 +21,90 @@ class StudyNestAuthApi extends StudyNestApiBase
     public function register()
     {
         $this->verify_csrf();
-        $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
-        $name = $this->require_text($data['name'] ?? $data['full_name'] ?? '', 'Full name', 100);
-        $email = trim((string) ($data['email'] ?? ''));
-        $password = (string) ($data['password'] ?? '');
-        $confirmation = (string) ($data['password_confirmation'] ?? '');
-        $requested_role = $data['role'] ?? 'student';
-        if (!in_array($requested_role, ['student', 'teacher'], true)) {
-            $this->fail('Choose either a student or teacher account.');
-        }
-        $photo = null;
-        $teacher_status = null;
-        if ($requested_role === 'teacher') {
-            $teacher_status = 'pending';
-        }
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 255) {
-            $this->fail('Enter a valid email address.');
-        }
-        if (strlen($password) < 8) {
-            $this->fail('Password must be at least 8 characters long.');
-        }
-        if (!hash_equals($password, $confirmation)) {
-            $this->fail('The password and confirmation do not match.');
-        }
-        $existing = $this->one('SELECT id, password, email_verified_at, email_otp_sent_at, email_otp_resend_count, email_otp_resend_reset_at FROM users WHERE email = ?', [$email]);
-        if ($existing && $existing['email_verified_at'] === null && password_verify($password, $existing['password'])) {
-            $this->guard_email_otp_resend($existing);
+        $phase = 'reading request';
+        try {
+            $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
+            $name = $this->require_text($data['name'] ?? $data['full_name'] ?? '', 'Full name', 100);
+            $email = trim((string) ($data['email'] ?? ''));
+            $password = (string) ($data['password'] ?? '');
+            $confirmation = (string) ($data['password_confirmation'] ?? '');
+            $requested_role = $data['role'] ?? 'student';
+            if (!in_array($requested_role, ['student', 'teacher'], true)) {
+                $this->fail('Choose either a student or teacher account.');
+            }
+            $photo = null;
+            $teacher_status = null;
+            if ($requested_role === 'teacher') {
+                $teacher_status = 'pending';
+            }
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 255) {
+                $this->fail('Enter a valid email address.');
+            }
+            if (strlen($password) < 8) {
+                $this->fail('Password must be at least 8 characters long.');
+            }
+            if (!hash_equals($password, $confirmation)) {
+                $this->fail('The password and confirmation do not match.');
+            }
+            $phase = 'checking existing account';
+            $existing = $this->one('SELECT id, password, email_verified_at, email_otp_sent_at, email_otp_resend_count, email_otp_resend_reset_at FROM users WHERE email = ?', [$email]);
+            if (
+                $existing
+                && $existing['email_verified_at'] === null
+                && is_string($existing['password'])
+                && $existing['password'] !== ''
+                && password_verify($password, $existing['password'])
+            ) {
+                $this->guard_email_otp_resend($existing);
+                $phase = 'sending verification email';
+                try {
+                    $this->send_email_otp((int) $existing['id'], $email);
+                } catch (RuntimeException $error) {
+                    $this->respond(['error' => $error->getMessage(), 'requires_email_verification' => true, 'email' => $email], 503);
+                }
+                $this->respond(['requires_email_verification' => true, 'email' => $email]);
+            }
+            if ($existing) {
+                $this->fail('An account with that email already exists.', 409);
+            }
+            if ($requested_role === 'teacher') {
+                $phase = 'validating teacher ID photo';
+                $photo = $this->save_teacher_id_photo();
+            }
+            $username = substr(preg_replace('/[^a-z0-9_]/i', '_', strstr($email, '@', true)), 0, 80) . '_' . bin2hex(random_bytes(3));
+            $phase = 'creating account';
+            $user_id = $this->insert(
+                'INSERT INTO users (username, full_name, email, password, role, teacher_status, teacher_id_photo, teacher_id_photo_data, is_active)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+                [
+                    $username,
+                    $name,
+                    $email,
+                    password_hash($password, PASSWORD_DEFAULT),
+                    'user',
+                    $teacher_status,
+                    $photo['filename'] ?? null,
+                    $photo['contents'] ?? null,
+                ]
+            );
+            $phase = 'sending verification email';
             try {
-                $this->send_email_otp((int) $existing['id'], $email);
+                $this->send_email_otp($user_id, $email);
             } catch (RuntimeException $error) {
                 $this->respond(['error' => $error->getMessage(), 'requires_email_verification' => true, 'email' => $email], 503);
             }
-            $this->respond(['requires_email_verification' => true, 'email' => $email]);
+            $this->respond(['requires_email_verification' => true, 'email' => $email], 201);
+        } catch (Throwable $error) {
+            error_log(sprintf(
+                'StudyNest account registration failed during %s: %s: %s at %s:%d',
+                $phase,
+                get_class($error),
+                $error->getMessage(),
+                $error->getFile(),
+                $error->getLine()
+            ));
+            throw $error;
         }
-        if ($existing) {
-            $this->fail('An account with that email already exists.', 409);
-        }
-        if ($requested_role === 'teacher') {
-            $photo = $this->save_teacher_id_photo();
-        }
-        $username = substr(preg_replace('/[^a-z0-9_]/i', '_', strstr($email, '@', true)), 0, 80) . '_' . bin2hex(random_bytes(3));
-        $user_id = $this->insert(
-            'INSERT INTO users (username, full_name, email, password, role, teacher_status, teacher_id_photo, teacher_id_photo_data, is_active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-            [
-                $username,
-                $name,
-                $email,
-                password_hash($password, PASSWORD_DEFAULT),
-                'user',
-                $teacher_status,
-                $photo['filename'] ?? null,
-                $photo['contents'] ?? null,
-            ]
-        );
-        try {
-            $this->send_email_otp($user_id, $email);
-        } catch (RuntimeException $error) {
-            $this->respond(['error' => $error->getMessage(), 'requires_email_verification' => true, 'email' => $email], 503);
-        }
-        $this->respond(['requires_email_verification' => true, 'email' => $email], 201);
     }
 
     public function resubmit_teacher_id_photo()
