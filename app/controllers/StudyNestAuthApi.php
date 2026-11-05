@@ -81,7 +81,8 @@ class StudyNestAuthApi extends StudyNestApiBase
         $email = trim((string) ($data['email'] ?? ''));
         $code = trim((string) ($data['code'] ?? ''));
         $user = $this->one(
-            'SELECT id, email_verified_at, email_otp_hash, email_otp_expires_at, email_otp_attempts
+            'SELECT id, email_verified_at, email_otp_hash, email_otp_expires_at, email_otp_attempts,
+             CASE WHEN email_otp_expires_at IS NOT NULL AND email_otp_expires_at >= NOW() THEN 1 ELSE 0 END AS email_otp_is_valid
              FROM users WHERE email = ?',
             [$email]
         );
@@ -91,7 +92,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         if ((int) $user['email_otp_attempts'] >= 5) {
             $this->fail('Too many incorrect codes. Request a new verification code.', 429);
         }
-        if (!$user['email_otp_expires_at'] || strtotime($user['email_otp_expires_at']) < time()) {
+        if ((int) $user['email_otp_is_valid'] !== 1) {
             $this->fail('That verification code has expired. Request a new code.', 400);
         }
         if (!preg_match('/^\d{6}$/', $code) || !password_verify($code, $user['email_otp_hash'])) {
@@ -133,32 +134,24 @@ class StudyNestAuthApi extends StudyNestApiBase
         $email = trim((string) ($data['email'] ?? ''));
         if (filter_var($email, FILTER_VALIDATE_EMAIL) && strlen($email) <= 255) {
             $user = $this->one(
-                'SELECT id, email, password_reset_otp_sent_at, password_reset_otp_send_count, password_reset_otp_send_reset_at
+                'SELECT id, email,
+                 CASE WHEN password_reset_otp_sent_at IS NOT NULL AND password_reset_otp_sent_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) THEN 1 ELSE 0 END AS reset_cooldown_active,
+                 CASE WHEN password_reset_otp_send_reset_at IS NOT NULL AND password_reset_otp_send_reset_at > DATE_SUB(NOW(), INTERVAL 1 DAY) THEN password_reset_otp_send_count ELSE 0 END AS reset_daily_count
                  FROM users WHERE email = ? AND is_active = 1 AND email_verified_at IS NOT NULL',
                 [$email]
             );
             if ($user) {
-                if ($user['password_reset_otp_sent_at'] && strtotime($user['password_reset_otp_sent_at']) > time() - 60) {
+                if ((int) $user['reset_cooldown_active'] === 1) {
                     $this->fail('Please wait one minute before requesting another password reset code.', 429);
                 }
-                if (!$user['password_reset_otp_send_reset_at'] || strtotime($user['password_reset_otp_send_reset_at']) < time() - 86400) {
-                    $this->execute(
-                        'UPDATE users SET password_reset_otp_send_count = 0, password_reset_otp_send_reset_at = NOW() WHERE id = ?',
-                        [(int) $user['id']]
-                    );
-                    $user['password_reset_otp_send_count'] = 0;
-                }
-                if ((int) $user['password_reset_otp_send_count'] >= 5) {
+                if ((int) $user['reset_daily_count'] >= 5) {
                     $this->fail('The daily password reset code limit has been reached. Try again tomorrow.', 429);
                 }
 
                 $code = (string) random_int(100000, 999999);
                 $this->execute(
-                    'UPDATE users SET password_reset_otp_hash = ?, password_reset_otp_expires_at = DATE_ADD(NOW(), INTERVAL 10 MINUTE),
-                     password_reset_otp_sent_at = NOW(), password_reset_otp_attempts = 0,
-                     password_reset_otp_send_count = CASE WHEN password_reset_otp_send_reset_at IS NULL OR password_reset_otp_send_reset_at < DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 ELSE password_reset_otp_send_count + 1 END,
-                     password_reset_otp_send_reset_at = CASE WHEN password_reset_otp_send_reset_at IS NULL OR password_reset_otp_send_reset_at < DATE_SUB(NOW(), INTERVAL 1 DAY) THEN NOW() ELSE password_reset_otp_send_reset_at END
-                     WHERE id = ?',
+                    'UPDATE users SET password_reset_otp_hash = ?, password_reset_otp_expires_at = NULL,
+                     password_reset_otp_sent_at = NULL, password_reset_otp_attempts = 0 WHERE id = ?',
                     [password_hash($code, PASSWORD_DEFAULT), (int) $user['id']]
                 );
                 try {
@@ -172,6 +165,14 @@ class StudyNestAuthApi extends StudyNestApiBase
                     );
                     $this->fail('StudyNest could not send the password reset email. Check your email settings or try again later.', 503);
                 }
+                $this->execute(
+                    'UPDATE users SET password_reset_otp_expires_at = DATE_ADD(NOW(), INTERVAL 10 MINUTE),
+                     password_reset_otp_sent_at = NOW(), password_reset_otp_attempts = 0,
+                     password_reset_otp_send_count = CASE WHEN password_reset_otp_send_reset_at IS NULL OR password_reset_otp_send_reset_at <= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 ELSE password_reset_otp_send_count + 1 END,
+                     password_reset_otp_send_reset_at = CASE WHEN password_reset_otp_send_reset_at IS NULL OR password_reset_otp_send_reset_at <= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN NOW() ELSE password_reset_otp_send_reset_at END
+                     WHERE id = ?',
+                    [(int) $user['id']]
+                );
             }
         }
         $this->respond([
@@ -195,7 +196,8 @@ class StudyNestAuthApi extends StudyNestApiBase
             $this->fail('The password and confirmation do not match.');
         }
         $user = $this->one(
-            'SELECT id, password_reset_otp_hash, password_reset_otp_expires_at, password_reset_otp_attempts
+            'SELECT id, password_reset_otp_hash, password_reset_otp_expires_at, password_reset_otp_attempts,
+             CASE WHEN password_reset_otp_expires_at IS NOT NULL AND password_reset_otp_expires_at >= NOW() THEN 1 ELSE 0 END AS password_reset_otp_is_valid
              FROM users WHERE email = ? AND is_active = 1 AND email_verified_at IS NOT NULL',
             [$email]
         );
@@ -205,7 +207,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         if ((int) $user['password_reset_otp_attempts'] >= 5) {
             $this->fail('Too many incorrect codes. Request a new password reset code.', 429);
         }
-        if (!$user['password_reset_otp_expires_at'] || strtotime($user['password_reset_otp_expires_at']) < time()) {
+        if ((int) $user['password_reset_otp_is_valid'] !== 1) {
             $this->fail('That password reset code has expired. Request a new code.', 400);
         }
         if (!preg_match('/^\d{6}$/', $code) || !password_verify($code, $user['password_reset_otp_hash'])) {

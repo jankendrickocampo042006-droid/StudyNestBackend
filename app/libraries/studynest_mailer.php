@@ -8,15 +8,15 @@ class StudyNest_mailer
 {
     public function send_otp($recipient, $code)
     {
-        $this->send_code($recipient, $code, 'Your StudyNest verification code', 'Use this code to verify your email address.');
+        $this->send_code($recipient, $code, 'Your StudyNest verification code', 'Use this code to verify your email address.', 15);
     }
 
     public function send_password_reset_otp($recipient, $code)
     {
-        $this->send_code($recipient, $code, 'Reset your StudyNest password', 'Use this code to reset your StudyNest password. If you did not request a reset, ignore this email.');
+        $this->send_code($recipient, $code, 'Reset your StudyNest password', 'Use this code to reset your StudyNest password. If you did not request a reset, ignore this email.', 10);
     }
 
-    private function send_code($recipient, $code, $subject, $purpose)
+    private function send_code($recipient, $code, $subject, $purpose, $expiry_minutes)
     {
         $username = (string) config_item('studynest_smtp_username');
         $password = (string) config_item('studynest_smtp_password');
@@ -40,12 +40,12 @@ class StudyNest_mailer
             $mail->addAddress($recipient);
             $mail->isHTML(true);
             $mail->Subject = $subject;
-            $mail->Body = '<p>' . htmlspecialchars($purpose, ENT_QUOTES, 'UTF-8') . '</p><p>Your StudyNest code is <strong>' . htmlspecialchars($code, ENT_QUOTES, 'UTF-8') . '</strong>.</p><p>It expires in 10 minutes. If you did not request this code, you can ignore this message.</p>';
-            $mail->AltBody = $purpose . ' Your StudyNest code is ' . $code . '. It expires in 10 minutes.';
+            $mail->Body = '<p>' . htmlspecialchars($purpose, ENT_QUOTES, 'UTF-8') . '</p><p>Your StudyNest code is <strong>' . htmlspecialchars($code, ENT_QUOTES, 'UTF-8') . '</strong>.</p><p>It expires in ' . $expiry_minutes . ' minutes. If you did not request this code, you can ignore this message.</p>';
+            $mail->AltBody = $purpose . ' Your StudyNest code is ' . $code . '. It expires in ' . $expiry_minutes . ' minutes.';
             $mail->send();
         } catch (Exception $error) {
             error_log('StudyNest OTP email delivery error: ' . $error->getMessage());
-            throw new RuntimeException('StudyNest could not send the verification email. Check the SMTP settings and Gmail App Password.', 0, $error);
+            throw new RuntimeException('StudyNest could not send the email. Check the SMTP provider settings and credentials.', 0, $error);
         }
     }
 }

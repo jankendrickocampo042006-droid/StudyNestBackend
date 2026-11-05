@@ -106,29 +106,46 @@ class StudyNestApiBase extends Controller
     {
         $code = (string) random_int(100000, 999999);
         $this->execute(
-            'UPDATE users SET email_otp_hash = ?, email_otp_expires_at = DATE_ADD(NOW(), INTERVAL 10 MINUTE),
-             email_otp_sent_at = NOW(), email_otp_attempts = 0,
-             email_otp_resend_count = CASE WHEN email_otp_resend_reset_at IS NULL OR email_otp_resend_reset_at < DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 ELSE email_otp_resend_count + 1 END,
-             email_otp_resend_reset_at = CASE WHEN email_otp_resend_reset_at IS NULL OR email_otp_resend_reset_at < DATE_SUB(NOW(), INTERVAL 1 DAY) THEN NOW() ELSE email_otp_resend_reset_at END
-             WHERE id = ?',
+            'UPDATE users SET email_otp_hash = ?, email_otp_expires_at = NULL,
+             email_otp_sent_at = NULL, email_otp_attempts = 0 WHERE id = ?',
             [password_hash($code, PASSWORD_DEFAULT), $user_id]
         );
-        $this->call->library('studynest_mailer')->send_otp($email, $code);
+        try {
+            $this->call->library('studynest_mailer')->send_otp($email, $code);
+        } catch (RuntimeException $error) {
+            $this->execute(
+                'UPDATE users SET email_otp_hash = NULL, email_otp_expires_at = NULL,
+                 email_otp_sent_at = NULL, email_otp_attempts = 0 WHERE id = ?',
+                [$user_id]
+            );
+            throw $error;
+        }
+        $this->execute(
+            'UPDATE users SET email_otp_expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE),
+             email_otp_sent_at = NOW(), email_otp_attempts = 0,
+             email_otp_resend_count = CASE WHEN email_otp_resend_reset_at IS NULL OR email_otp_resend_reset_at <= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 ELSE email_otp_resend_count + 1 END,
+             email_otp_resend_reset_at = CASE WHEN email_otp_resend_reset_at IS NULL OR email_otp_resend_reset_at <= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN NOW() ELSE email_otp_resend_reset_at END
+             WHERE id = ?',
+            [$user_id]
+        );
     }
 
     protected function guard_email_otp_resend(array $user)
     {
-        if ($user['email_otp_sent_at'] && strtotime($user['email_otp_sent_at']) > time() - 60) {
+        $limits = $this->one(
+            'SELECT
+                CASE WHEN email_otp_sent_at IS NOT NULL AND email_otp_sent_at > DATE_SUB(NOW(), INTERVAL 60 SECOND) THEN 1 ELSE 0 END AS cooldown_active,
+                CASE WHEN email_otp_resend_reset_at IS NOT NULL AND email_otp_resend_reset_at > DATE_SUB(NOW(), INTERVAL 1 DAY) THEN email_otp_resend_count ELSE 0 END AS daily_count
+             FROM users WHERE id = ?',
+            [(int) $user['id']]
+        );
+        if (!$limits) {
+            throw new RuntimeException('The account email verification limits could not be checked.');
+        }
+        if ((int) $limits['cooldown_active'] === 1) {
             $this->fail('Please wait one minute before requesting another code.', 429);
         }
-        if (!$user['email_otp_resend_reset_at'] || strtotime($user['email_otp_resend_reset_at']) < time() - 86400) {
-            $this->execute(
-                'UPDATE users SET email_otp_resend_count = 0, email_otp_resend_reset_at = NOW() WHERE id = ?',
-                [(int) $user['id']]
-            );
-            $user['email_otp_resend_count'] = 0;
-        }
-        if ((int) $user['email_otp_resend_count'] >= 5) {
+        if ((int) $limits['daily_count'] >= 5) {
             $this->fail('The daily verification-code limit has been reached. Try again tomorrow.', 429);
         }
     }
