@@ -169,15 +169,14 @@ class StudyNestApiBase extends Controller
         if ($image[0] > 8000 || $image[1] > 8000 || $image[0] * $image[1] > 32000000) {
             $this->fail('The teacher ID photo dimensions are too large.');
         }
-        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
-        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
-            throw new RuntimeException('Private teacher ID storage could not be created.');
+        $contents = file_get_contents($file['tmp_name']);
+        if ($contents === false || strlen($contents) !== $actual_size) {
+            throw new RuntimeException('The teacher ID photo could not be read for secure storage.');
         }
-        $filename = bin2hex(random_bytes(24)) . '.' . $extensions[$mime];
-        if (!move_uploaded_file($file['tmp_name'], $directory . DIRECTORY_SEPARATOR . $filename)) {
-            throw new RuntimeException('The teacher ID photo could not be stored securely.');
-        }
-        return $filename;
+        return [
+            'filename' => bin2hex(random_bytes(24)) . '.' . $extensions[$mime],
+            'contents' => $contents,
+        ];
     }
 
     protected function save_lesson_pdf()

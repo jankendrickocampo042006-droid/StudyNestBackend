@@ -62,9 +62,18 @@ class StudyNestAuthApi extends StudyNestApiBase
         }
         $username = substr(preg_replace('/[^a-z0-9_]/i', '_', strstr($email, '@', true)), 0, 80) . '_' . bin2hex(random_bytes(3));
         $user_id = $this->insert(
-            'INSERT INTO users (username, full_name, email, password, role, teacher_status, teacher_id_photo, is_active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
-            [$username, $name, $email, password_hash($password, PASSWORD_DEFAULT), 'user', $teacher_status, $photo]
+            'INSERT INTO users (username, full_name, email, password, role, teacher_status, teacher_id_photo, teacher_id_photo_data, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+            [
+                $username,
+                $name,
+                $email,
+                password_hash($password, PASSWORD_DEFAULT),
+                'user',
+                $teacher_status,
+                $photo['filename'] ?? null,
+                $photo['contents'] ?? null,
+            ]
         );
         try {
             $this->send_email_otp($user_id, $email);
@@ -72,6 +81,26 @@ class StudyNestAuthApi extends StudyNestApiBase
             $this->respond(['error' => $error->getMessage(), 'requires_email_verification' => true, 'email' => $email], 503);
         }
         $this->respond(['requires_email_verification' => true, 'email' => $email], 201);
+    }
+
+    public function resubmit_teacher_id_photo()
+    {
+        $this->verify_csrf();
+        $user = $this->current_user();
+        if (!$user || $user['role'] !== 'teacher_pending') {
+            $this->fail('Only applicants awaiting teacher approval can replace their ID photo.', 403);
+        }
+
+        $photo = $this->save_teacher_id_photo();
+        $updated = $this->execute(
+            "UPDATE users SET teacher_id_photo = ?, teacher_id_photo_data = ?
+             WHERE id = ? AND teacher_status = 'pending' AND is_active = 1",
+            [$photo['filename'], $photo['contents'], (int) $user['id']]
+        );
+        if (!$updated) {
+            $this->fail('Your teacher application is no longer pending. Refresh and try again.', 409);
+        }
+        $this->respond(['ok' => true, 'message' => 'Your teacher ID photo has been updated for administrator review.']);
     }
 
     public function verify_email()

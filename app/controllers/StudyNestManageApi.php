@@ -153,38 +153,57 @@ class StudyNestManageApi extends StudyNestApiBase
     public function manage_teacher_applications()
     {
         $this->require_super_admin();
-        $this->respond($this->all(
-            "SELECT id, full_name AS name, email, teacher_id_photo, created_at
+        $applications = $this->all(
+            "SELECT id, full_name AS name, email, teacher_id_photo,
+                    teacher_id_photo_data IS NOT NULL AS teacher_id_photo_stored, created_at
              FROM users WHERE teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1
              ORDER BY created_at, id"
-        ));
+        );
+        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
+        foreach ($applications as &$application) {
+            $legacy_path = $application['teacher_id_photo']
+                ? $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo'])
+                : '';
+            $application['teacher_id_photo_available'] = (int) $application['teacher_id_photo_stored'] === 1
+                || ($legacy_path !== '' && is_file($legacy_path));
+            unset($application['teacher_id_photo_stored']);
+        }
+        unset($application);
+        $this->respond($applications);
     }
 
     public function teacher_application_photo($id)
     {
         $this->require_super_admin();
         $application = $this->one(
-            "SELECT teacher_id_photo FROM users
+            "SELECT teacher_id_photo, teacher_id_photo_data FROM users
              WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
             [(int) $id]
         );
-        if (!$application || !$application['teacher_id_photo']) {
+        if (!$application || (!$application['teacher_id_photo'] && $application['teacher_id_photo_data'] === null)) {
             $this->fail('Teacher ID photo not found.', 404);
         }
-        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
-        $path = $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo']);
-        if (!is_file($path)) {
-            $this->fail('Teacher ID photo is unavailable.', 404);
+        if ($application['teacher_id_photo_data'] !== null) {
+            $contents = $application['teacher_id_photo_data'];
+            $mime = (new finfo(FILEINFO_MIME_TYPE))->buffer($contents);
+        } else {
+            $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
+            $path = $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo']);
+            if (!is_file($path)) {
+                $this->fail('Teacher ID photo is unavailable. Ask the applicant to upload it again.', 404);
+            }
+            $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path);
+            $contents = file_get_contents($path);
         }
-        $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path);
-        if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
+        if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true) || $contents === false) {
             $this->fail('Teacher ID photo is unavailable.', 404);
         }
         header('Content-Type: ' . $mime);
-        header('Content-Length: ' . filesize($path));
+        header('Content-Length: ' . strlen($contents));
         header('Cache-Control: private, no-store');
         header('X-Content-Type-Options: nosniff');
-        readfile($path);
+        header('Content-Disposition: inline');
+        echo $contents;
         exit;
     }
 
@@ -193,7 +212,9 @@ class StudyNestManageApi extends StudyNestApiBase
         $admin_id = $this->require_super_admin();
         $id = (int) $id;
         $application = $this->one(
-            "SELECT id, full_name AS name, email, teacher_id, created_at, is_active, email_verified_at, teacher_id_photo FROM users
+            "SELECT id, full_name AS name, email, teacher_id, created_at, is_active, email_verified_at,
+                    teacher_id_photo, teacher_id_photo_data IS NOT NULL AS teacher_id_photo_stored
+             FROM users
              WHERE id = ? AND teacher_status = 'pending' AND email_verified_at IS NOT NULL AND is_active = 1",
             [$id]
         );
@@ -207,8 +228,15 @@ class StudyNestManageApi extends StudyNestApiBase
         if (!in_array($decision, ['approve', 'reject'], true)) {
             $this->fail('Choose whether to approve or reject this application.');
         }
-        if ($decision === 'approve' && !$application['teacher_id_photo']) {
-            $this->fail('This application has no teacher ID photo and cannot be approved.', 422);
+        if ($decision === 'approve') {
+            $legacy_path = '';
+            if ($application['teacher_id_photo']) {
+                $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'teacher-ids';
+                $legacy_path = $directory . DIRECTORY_SEPARATOR . basename($application['teacher_id_photo']);
+            }
+            if ((int) $application['teacher_id_photo_stored'] !== 1 && ($legacy_path === '' || !is_file($legacy_path))) {
+                $this->fail('This application has no available teacher ID photo and cannot be approved. Ask the applicant to upload it again.', 422);
+            }
         }
 
         $approved = $decision === 'approve';

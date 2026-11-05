@@ -12,6 +12,7 @@ CREATE TABLE users (
     teacher_status ENUM('pending','approved','rejected') NULL,
     teacher_reviewed_at DATETIME NULL,
     teacher_id_photo VARCHAR(80) NULL,
+    teacher_id_photo_data MEDIUMBLOB NULL,
     email_verified_at DATETIME NULL,
     email_otp_hash VARCHAR(255) NULL,
     email_otp_expires_at DATETIME NULL,
