@@ -43,6 +43,12 @@ class Database_session_handler implements SessionHandlerInterface
     private $db;
 
     /**
+     * Session configuration
+     * @var array
+     */
+    private $config;
+
+    /**
      * Session table name
      * @var string
      */
@@ -56,6 +62,7 @@ class Database_session_handler implements SessionHandlerInterface
 
     public function __construct()
     {
+        $this->config = get_config();
         $this->db = load_class('Database', 'database');
 
         $this->table = $this->config['sess_table'] ?? 'sessions';

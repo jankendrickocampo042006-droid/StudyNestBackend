@@ -143,3 +143,13 @@ SET @studynest_sql = IF(
 PREPARE studynest_repair_stmt FROM @studynest_sql;
 EXECUTE studynest_repair_stmt;
 DEALLOCATE PREPARE studynest_repair_stmt;
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    user_agent VARCHAR(512) NOT NULL,
+    timestamp INT UNSIGNED NOT NULL,
+    data LONGBLOB NOT NULL,
+    PRIMARY KEY (id),
+    INDEX sessions_timestamp_idx (timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

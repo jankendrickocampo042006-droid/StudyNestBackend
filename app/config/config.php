@@ -230,7 +230,7 @@ $config['subclass_prefix']          = 'MY_';
 |
 |--------------------------------------------------------------------------
 */
-$config['sess_driver']             = 'file';
+$config['sess_driver']             = getenv('SESSION_DRIVER') ?: 'file';
 $config['sess_table']              = 'sessions';
 $config['sess_cookie_name']        = 'LLSession';
 $config['sess_expiration']         = 7200;
@@ -247,7 +247,7 @@ $config['max_session_creations']   = 10;
 $config['creation_window']         = 60;
 $config['lock_duration_creation']  = 120;
 $config['security_file']           = ROOT_DIR . 'runtime/session/session_security.json';
-$config['sess_inactivity_timeout'] = 1800;
+$config['sess_inactivity_timeout'] = 7200;
 $config['session_hmac_secret']     = getenv('APP_KEY') ?: '';
 
 /*
@@ -263,7 +263,7 @@ $config['cookie_prefix']           = '';
 $config['cookie_domain']           = '';
 $config['cookie_path']             = '/';
 $config['cookie_secure']           = strtolower($config['environment']) === 'production';
-$config['cookie_expiration']       = 86400;
+$config['cookie_expiration']       = 7200;
 $config['cookie_httponly']         = FALSE;
 $config['cookie_samesite']         = strtolower($config['environment']) === 'production' ? 'None' : 'Strict';
 
