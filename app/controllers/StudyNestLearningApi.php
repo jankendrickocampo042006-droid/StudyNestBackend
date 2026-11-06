@@ -115,7 +115,10 @@ class StudyNestLearningApi extends StudyNestApiBase
                             'description', ss.description,
                             'created_at', ss.created_at,
                             'subject', s.name,
-                            'topic', t.title,
+                            'topic', COALESCE(ss.custom_topic, t.title),
+                            'topic_id', ss.topic_id,
+                            'custom_topic', ss.custom_topic,
+                            'pdf_original_name', ss.pdf_original_name,
                             'cards', (
                                 SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
                                     'id', f.id,
@@ -470,7 +473,9 @@ class StudyNestLearningApi extends StudyNestApiBase
     private function set_payload($set_id, $user_id)
     {
         $set = $this->one(
-            'SELECT ss.id, ss.user_id, ss.title, ss.description, ss.created_at, s.name AS subject, t.title AS topic
+            'SELECT ss.id, ss.user_id, ss.title, ss.description, ss.created_at,
+                    ss.topic_id, ss.custom_topic, ss.pdf_original_name,
+                    s.name AS subject, COALESCE(ss.custom_topic, t.title) AS topic
              FROM study_sets ss
              LEFT JOIN subjects s ON s.id = ss.subject_id
              LEFT JOIN topics t ON t.id = ss.topic_id
@@ -487,6 +492,36 @@ class StudyNestLearningApi extends StudyNestApiBase
         return $set;
     }
 
+    private function save_study_set_pdf()
+    {
+        $file = $_FILES['study_pdf'] ?? null;
+        if (!$file || !isset($file['error']) || $file['error'] === UPLOAD_ERR_NO_FILE) {
+            return null;
+        }
+        if ($file['error'] !== UPLOAD_ERR_OK) {
+            $this->fail('The PDF could not be uploaded. Try again with a smaller file.');
+        }
+        $actual_size = is_uploaded_file($file['tmp_name']) ? filesize($file['tmp_name']) : false;
+        if ($actual_size === false || $actual_size < 1 || $actual_size > 20 * 1024 * 1024) {
+            $this->fail('The PDF must be smaller than 20 MB.');
+        }
+        $mime = (new finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        $signature = file_get_contents($file['tmp_name'], false, null, 0, 5);
+        if ($mime !== 'application/pdf' || $signature !== '%PDF-') {
+            $this->fail('Upload a valid PDF document.');
+        }
+        $original_name = trim((string) ($file['name'] ?? 'study-material.pdf'));
+        $original_name = preg_replace('/[\x00-\x1F\x7F]/u', '', basename(str_replace('\\', '/', $original_name)));
+        if ($original_name === '' || strlen($original_name) > 180) {
+            $this->fail('The PDF filename must be no longer than 180 characters.');
+        }
+        $contents = file_get_contents($file['tmp_name']);
+        if ($contents === false || strlen($contents) !== $actual_size) {
+            throw new RuntimeException('The study set PDF could not be read for secure storage.');
+        }
+        return ['original_name' => $original_name, 'contents' => $contents];
+    }
+
     private function save_set($user_id, array $data, $set_id = null)
     {
         $is_update = (bool) $set_id;
@@ -494,7 +529,14 @@ class StudyNestLearningApi extends StudyNestApiBase
         $description = trim((string) ($data['description'] ?? ''));
         $subject_name = trim((string) ($data['subject'] ?? ''));
         $topic_name = trim((string) ($data['topic'] ?? ''));
+        $topic_id = trim((string) ($data['topic_id'] ?? ''));
+        $custom_topic = $topic_id === 'custom'
+            ? $this->require_text($data['custom_topic'] ?? '', 'My topic', 180)
+            : null;
         $cards = $data['cards'] ?? null;
+        if (is_string($cards)) {
+            $cards = json_decode($cards, true);
+        }
         if (!is_array($cards) || count($cards) < 1 || count($cards) > 100) {
             $this->fail('Add between 1 and 100 flashcards.');
         }
@@ -509,7 +551,19 @@ class StudyNestLearningApi extends StudyNestApiBase
             $this->fail('Choose a valid subject.');
         }
         $topic = null;
-        if ($topic_name !== '' && $subject) {
+        if ($topic_id !== '' && $topic_id !== 'custom') {
+            if (!ctype_digit($topic_id)) {
+                $this->fail('Choose a valid topic.');
+            }
+            $topic = $this->one('SELECT id, subject_id FROM topics WHERE id = ?', [(int) $topic_id]);
+            if (!$topic) {
+                $this->fail('Choose a valid topic.');
+            }
+            if ($subject && (int) $subject['id'] !== (int) $topic['subject_id']) {
+                $this->fail('Choose a topic from the selected subject.');
+            }
+            $subject = $this->one('SELECT id FROM subjects WHERE id = ?', [(int) $topic['subject_id']]);
+        } elseif ($topic_id === '' && $topic_name !== '' && $subject) {
             $topic = $this->one('SELECT id FROM topics WHERE title = ? AND subject_id = ?', [$topic_name, $subject['id']]);
             if (!$topic) {
                 $this->execute('INSERT INTO topics (subject_id, title, summary) VALUES (?, ?, ?)', [$subject['id'], $topic_name, '']);
@@ -517,23 +571,51 @@ class StudyNestLearningApi extends StudyNestApiBase
             }
         }
 
+        $existing_set = null;
+        if ($set_id) {
+            $existing_set = $this->one(
+                'SELECT id, pdf_original_name FROM study_sets WHERE id = ? AND user_id = ?',
+                [$set_id, $user_id]
+            );
+            if (!$existing_set) {
+                $this->fail('Study set not found.', 404);
+            }
+        }
+        $pdf = $this->save_study_set_pdf();
+        $remove_pdf = ($data['remove_study_pdf'] ?? '') === '1';
+        if ($custom_topic && !$pdf && !$remove_pdf && empty($existing_set['pdf_original_name'])) {
+            $this->fail('Choose a PDF for your custom topic.');
+        }
+        if ($remove_pdf && !$pdf && $custom_topic) {
+            $this->fail('A custom topic needs a PDF. Choose another PDF or keep the current one.');
+        }
+
         $db = $this->db();
         $db->raw('START TRANSACTION');
         try {
             if ($set_id) {
-                $changed = $this->execute(
-                    'UPDATE study_sets SET subject_id = ?, topic_id = ?, title = ?, description = ? WHERE id = ? AND user_id = ?',
-                    [$subject['id'] ?? null, $topic['id'] ?? null, $title, $description, $set_id, $user_id]
-                );
-                if (!$changed && !$this->one('SELECT id FROM study_sets WHERE id = ? AND user_id = ?', [$set_id, $user_id])) {
-                    $db->raw('ROLLBACK');
-                    $this->fail('Study set not found.', 404);
+                if ($pdf) {
+                    $this->execute(
+                        'UPDATE study_sets SET subject_id = ?, topic_id = ?, custom_topic = ?, pdf_original_name = ?, pdf_data = ?, title = ?, description = ? WHERE id = ? AND user_id = ?',
+                        [$subject['id'] ?? null, $topic['id'] ?? null, $custom_topic, $pdf['original_name'], $pdf['contents'], $title, $description, $set_id, $user_id]
+                    );
+                } elseif ($remove_pdf) {
+                    $this->execute(
+                        'UPDATE study_sets SET subject_id = ?, topic_id = ?, custom_topic = ?, pdf_original_name = NULL, pdf_data = NULL, title = ?, description = ? WHERE id = ? AND user_id = ?',
+                        [$subject['id'] ?? null, $topic['id'] ?? null, $custom_topic, $title, $description, $set_id, $user_id]
+                    );
+                } else {
+                    $this->execute(
+                        'UPDATE study_sets SET subject_id = ?, topic_id = ?, custom_topic = ?, title = ?, description = ? WHERE id = ? AND user_id = ?',
+                        [$subject['id'] ?? null, $topic['id'] ?? null, $custom_topic, $title, $description, $set_id, $user_id]
+                    );
                 }
                 $this->execute('DELETE FROM flashcards WHERE study_set_id = ?', [$set_id]);
             } else {
                 $set_id = $this->insert(
-                    'INSERT INTO study_sets (user_id, subject_id, topic_id, title, description) VALUES (?, ?, ?, ?, ?)',
-                    [$user_id, $subject['id'] ?? null, $topic['id'] ?? null, $title, $description]
+                    'INSERT INTO study_sets (user_id, subject_id, topic_id, custom_topic, pdf_original_name, pdf_data, title, description)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [$user_id, $subject['id'] ?? null, $topic['id'] ?? null, $custom_topic, $pdf['original_name'] ?? null, $pdf['contents'] ?? null, $title, $description]
                 );
             }
             foreach ($cards as $card) {
@@ -568,7 +650,8 @@ class StudyNestLearningApi extends StudyNestApiBase
             ))));
         }
         $this->verify_csrf();
-        $set = $this->save_set($user_id, $this->body());
+        $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
+        $set = $this->save_set($user_id, $data);
         $this->respond($set, 201);
     }
 
@@ -582,7 +665,8 @@ class StudyNestLearningApi extends StudyNestApiBase
         }
         $this->verify_csrf();
         if ($_SERVER['REQUEST_METHOD'] === 'PUT') {
-            $set = $this->save_set($user_id, $this->body(), $id);
+            $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
+            $set = $this->save_set($user_id, $data, $id);
             $this->respond($set);
         }
         if (!$this->one('SELECT id FROM study_sets WHERE id = ? AND user_id = ?', [$id, $user_id])) {
@@ -590,6 +674,26 @@ class StudyNestLearningApi extends StudyNestApiBase
         }
         $this->execute('DELETE FROM study_sets WHERE id = ? AND user_id = ?', [$id, $user_id]);
         $this->respond(['ok' => true]);
+    }
+
+    public function study_set_pdf($id)
+    {
+        $user_id = $this->user_id();
+        $set = $this->one(
+            'SELECT pdf_original_name, pdf_data FROM study_sets WHERE id = ? AND user_id = ?',
+            [(int) $id, $user_id]
+        );
+        if (!$set || !$set['pdf_data']) {
+            $this->fail('Study set PDF not found.', 404);
+        }
+        $filename = preg_replace('/[^A-Za-z0-9._-]/', '_', $set['pdf_original_name'] ?: 'study-material.pdf');
+        header('Content-Type: application/pdf');
+        header('Content-Length: ' . strlen($set['pdf_data']));
+        header('Content-Disposition: inline; filename="' . $filename . '"');
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, no-store');
+        echo $set['pdf_data'];
+        exit;
     }
 
     public function review_lesson($lesson_id)

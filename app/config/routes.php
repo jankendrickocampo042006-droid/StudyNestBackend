@@ -62,6 +62,7 @@ $router->get('/api/profile', 'StudyNestLearningApi::profile');
 $router->put('/api/profile', 'StudyNestLearningApi::profile');
 $router->get('/api/study-sets', 'StudyNestLearningApi::study_sets');
 $router->post('/api/study-sets', 'StudyNestLearningApi::study_sets');
+$router->get('/api/study-sets/{id}/pdf', 'StudyNestLearningApi::study_set_pdf');
 $router->get('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');
 $router->put('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');
 $router->delete('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');

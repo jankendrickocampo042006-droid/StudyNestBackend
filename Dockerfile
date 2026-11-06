@@ -11,6 +11,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends unzip \
     && docker-php-ext-install pdo pdo_mysql \
     && rm -rf /var/lib/apt/lists/*
+
+RUN printf "upload_max_filesize=22M\npost_max_size=24M\n" > /usr/local/etc/php/conf.d/studynest-uploads.ini
  
 # Enable Apache mod_rewrite
 RUN a2enmod rewrite

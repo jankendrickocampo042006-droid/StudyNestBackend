@@ -3,11 +3,11 @@ SET @studynest_sql = IF(
     (SELECT COUNT(*) FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'users' AND COLUMN_NAME = 'role') = 1
     AND LOCATE(
-        "'teacher'",
+        '''teacher''',
         (SELECT COLUMN_TYPE FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'users' AND COLUMN_NAME = 'role')
     ) = 0,
-    "ALTER TABLE users MODIFY role ENUM('admin','moderator','teacher','user') NOT NULL DEFAULT 'user'",
+    'ALTER TABLE users MODIFY role ENUM(''admin'',''moderator'',''teacher'',''user'') NOT NULL DEFAULT ''user''',
     'SELECT 1'
 );
 PREPARE studynest_repair_stmt FROM @studynest_sql;
@@ -27,7 +27,7 @@ DEALLOCATE PREPARE studynest_repair_stmt;
 SET @studynest_sql = IF(
     (SELECT COUNT(*) FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'users' AND COLUMN_NAME = 'teacher_status') = 0,
-    "ALTER TABLE users ADD COLUMN teacher_status ENUM('pending','approved','rejected') NULL AFTER teacher_id",
+    'ALTER TABLE users ADD COLUMN teacher_status ENUM(''pending'',''approved'',''rejected'') NULL AFTER teacher_id',
     'SELECT 1'
 );
 PREPARE studynest_repair_stmt FROM @studynest_sql;
@@ -139,6 +139,41 @@ SET @studynest_sql = IF(
      WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'users' AND COLUMN_NAME = 'email_otp_resend_reset_at') = 0,
     'ALTER TABLE users ADD COLUMN email_otp_resend_reset_at DATETIME NULL',
     'SELECT 1'
+);
+PREPARE studynest_repair_stmt FROM @studynest_sql;
+EXECUTE studynest_repair_stmt;
+DEALLOCATE PREPARE studynest_repair_stmt;
+
+SET @studynest_sql = IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'study_sets' AND COLUMN_NAME = 'custom_topic') = 0,
+    'ALTER TABLE study_sets ADD COLUMN custom_topic VARCHAR(180) NULL AFTER topic_id',
+    'SELECT 1'
+);
+PREPARE studynest_repair_stmt FROM @studynest_sql;
+EXECUTE studynest_repair_stmt;
+DEALLOCATE PREPARE studynest_repair_stmt;
+
+SET @studynest_sql = IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'study_sets' AND COLUMN_NAME = 'pdf_original_name') = 0,
+    'ALTER TABLE study_sets ADD COLUMN pdf_original_name VARCHAR(180) NULL AFTER custom_topic',
+    'SELECT 1'
+);
+PREPARE studynest_repair_stmt FROM @studynest_sql;
+EXECUTE studynest_repair_stmt;
+DEALLOCATE PREPARE studynest_repair_stmt;
+
+SET @studynest_sql = IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'study_sets' AND COLUMN_NAME = 'pdf_data') = 0,
+    'ALTER TABLE study_sets ADD COLUMN pdf_data LONGBLOB NULL AFTER pdf_original_name',
+    IF(
+        (SELECT DATA_TYPE FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'study_sets' AND COLUMN_NAME = 'pdf_data') <> 'longblob',
+        'ALTER TABLE study_sets MODIFY COLUMN pdf_data LONGBLOB NULL',
+        'SELECT 1'
+    )
 );
 PREPARE studynest_repair_stmt FROM @studynest_sql;
 EXECUTE studynest_repair_stmt;
