@@ -211,18 +211,28 @@ class StudyNestLearningApi extends StudyNestApiBase
                     ) AS weak_topics,
                     (
                         SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
-                            'title', q.title,
-                            'subject', s.name,
-                            'score', qa.percentage,
-                            'date', qa.completed_at
+                            'title', attempts.title,
+                            'subject', attempts.subject,
+                            'score', attempts.percentage,
+                            'date', attempts.completed_at
                         )), JSON_ARRAY())
-                        FROM quiz_attempts qa
-                        JOIN quizzes q ON q.id = qa.quiz_id
-                        JOIN topics t ON t.id = q.topic_id
-                        JOIN subjects s ON s.id = t.subject_id
-                        WHERE qa.user_id = ?
+                        FROM (
+                            SELECT q.title, s.name AS subject, qa.percentage, qa.completed_at
+                            FROM quiz_attempts qa
+                            JOIN quizzes q ON q.id = qa.quiz_id
+                            JOIN topics t ON t.id = q.topic_id
+                            JOIN subjects s ON s.id = t.subject_id
+                            WHERE qa.user_id = ?
+                            UNION ALL
+                            SELECT pq.title, ps.name AS subject, pqa.percentage, pqa.completed_at
+                            FROM private_quiz_attempts pqa
+                            JOIN private_quizzes pq ON pq.id = pqa.quiz_id
+                            JOIN private_topics pt ON pt.id = pq.topic_id
+                            JOIN private_subjects ps ON ps.id = pt.subject_id
+                            WHERE pqa.user_id = ?
+                        ) attempts
                     ) AS attempts
-                SQL, array_fill(0, 9, $user_id));
+                SQL, array_fill(0, 10, $user_id));
         }
         $payload = [
             'csrf_token' => $this->csrf_token(),
@@ -492,9 +502,9 @@ class StudyNestLearningApi extends StudyNestApiBase
         return $set;
     }
 
-    private function save_study_set_pdf()
+    private function save_study_set_pdf($field_name = 'study_pdf')
     {
-        $file = $_FILES['study_pdf'] ?? null;
+        $file = $_FILES[$field_name] ?? null;
         if (!$file || !isset($file['error']) || $file['error'] === UPLOAD_ERR_NO_FILE) {
             return null;
         }
@@ -517,7 +527,7 @@ class StudyNestLearningApi extends StudyNestApiBase
         }
         $contents = file_get_contents($file['tmp_name']);
         if ($contents === false || strlen($contents) !== $actual_size) {
-            throw new RuntimeException('The study set PDF could not be read for secure storage.');
+            throw new RuntimeException('The uploaded PDF could not be read for secure storage.');
         }
         return ['original_name' => $original_name, 'contents' => $contents];
     }
@@ -815,6 +825,348 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->verify_csrf();
         $this->execute('DELETE FROM favorite_lessons WHERE user_id = ? AND lesson_id = ?', [$this->user_id(), (int) $lesson_id]);
         $this->respond(['ok' => true]);
+    }
+
+    private function private_subject_owned($subject_id, $user_id)
+    {
+        return $this->one('SELECT id FROM private_subjects WHERE id = ? AND user_id = ?', [(int) $subject_id, $user_id]);
+    }
+
+    private function private_topic_owned($topic_id, $user_id)
+    {
+        return $this->one(
+            'SELECT t.id, t.subject_id FROM private_topics t
+             JOIN private_subjects s ON s.id = t.subject_id
+             WHERE t.id = ? AND s.user_id = ?',
+            [(int) $topic_id, $user_id]
+        );
+    }
+
+    private function private_quiz_owned($quiz_id, $user_id)
+    {
+        return $this->one(
+            'SELECT q.id, q.title, q.duration_minutes, t.title AS topic, s.name AS subject
+             FROM private_quizzes q
+             JOIN private_topics t ON t.id = q.topic_id
+             JOIN private_subjects s ON s.id = t.subject_id
+             WHERE q.id = ? AND s.user_id = ?',
+            [(int) $quiz_id, $user_id]
+        );
+    }
+
+    public function private_library()
+    {
+        $user_id = $this->user_id();
+        $subjects = $this->all(
+            'SELECT id, name, description FROM private_subjects WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+            [$user_id]
+        );
+        foreach ($subjects as &$subject) {
+            $subject['topics'] = $this->all(
+                'SELECT id, title FROM private_topics WHERE subject_id = ? ORDER BY id',
+                [(int) $subject['id']]
+            );
+            foreach ($subject['topics'] as &$topic) {
+                $topic['lessons'] = $this->all(
+                    'SELECT id, title, content, pdf_original_name FROM private_lessons WHERE topic_id = ? ORDER BY id DESC',
+                    [(int) $topic['id']]
+                );
+                $topic['quizzes'] = $this->all(
+                    'SELECT q.id, q.title, q.duration_minutes AS time, COUNT(qq.id) AS questions
+                     FROM private_quizzes q LEFT JOIN private_quiz_questions qq ON qq.quiz_id = q.id
+                     WHERE q.topic_id = ? GROUP BY q.id ORDER BY q.id DESC',
+                    [(int) $topic['id']]
+                );
+            }
+            unset($topic);
+        }
+        unset($subject);
+        $this->respond($subjects);
+    }
+
+    public function private_library_resource($kind, $id = null)
+    {
+        $user_id = $this->user_id();
+        if (!in_array($kind, ['subjects', 'topics', 'lessons', 'quizzes'], true)) {
+            $this->fail('Private library content type not found.', 404);
+        }
+        $method = $_SERVER['REQUEST_METHOD'];
+        $record_id = (int) ($id ?? 0);
+        if ($method !== 'POST' && !$record_id) {
+            $this->fail('Private library item not found.', 404);
+        }
+
+        if ($kind === 'subjects') {
+            $table = 'private_subjects';
+            $owned = $record_id ? $this->private_subject_owned($record_id, $user_id) : true;
+        } elseif ($kind === 'topics') {
+            $table = 'private_topics';
+            $owned = $record_id ? $this->private_topic_owned($record_id, $user_id) : true;
+        } elseif ($kind === 'lessons') {
+            $table = 'private_lessons';
+            $owned = $record_id ? $this->one(
+                'SELECT l.id FROM private_lessons l JOIN private_topics t ON t.id = l.topic_id
+                 JOIN private_subjects s ON s.id = t.subject_id WHERE l.id = ? AND s.user_id = ?',
+                [$record_id, $user_id]
+            ) : true;
+        } else {
+            $table = 'private_quizzes';
+            $owned = $record_id ? $this->one(
+                'SELECT q.id FROM private_quizzes q JOIN private_topics t ON t.id = q.topic_id
+                 JOIN private_subjects s ON s.id = t.subject_id WHERE q.id = ? AND s.user_id = ?',
+                [$record_id, $user_id]
+            ) : true;
+        }
+        if (!$owned) {
+            $this->fail('Private library item not found.', 404);
+        }
+        if ($method === 'DELETE') {
+            $this->verify_csrf();
+            $this->execute("DELETE FROM {$table} WHERE id = ?", [$record_id]);
+            $this->respond(['ok' => true]);
+        }
+        if ($method !== 'POST' && $method !== 'PUT') {
+            $this->fail('Unsupported private library operation.', 405);
+        }
+        $this->verify_csrf();
+        $multipart = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false;
+        $data = $multipart ? $_POST : $this->body();
+        $is_update = $method === 'PUT';
+
+        if ($kind === 'subjects') {
+            $name = trim((string) ($data['name'] ?? ''));
+            $description = trim((string) ($data['description'] ?? ''));
+            if ($name === '' || mb_strlen($name) > 150) {
+                $this->fail('Enter a subject name up to 150 characters.');
+            }
+            if ($is_update) {
+                $this->execute('UPDATE private_subjects SET name = ?, description = ? WHERE id = ? AND user_id = ?', [$name, $description, $record_id, $user_id]);
+            } else {
+                $record_id = $this->insert('INSERT INTO private_subjects (user_id, name, description) VALUES (?, ?, ?)', [$user_id, $name, $description]);
+            }
+        } elseif ($kind === 'topics') {
+            $subject_id = (int) ($data['subject_id'] ?? 0);
+            $title = trim((string) ($data['title'] ?? ''));
+            if (!$this->private_subject_owned($subject_id, $user_id)) {
+                $this->fail('Choose one of your private subjects.');
+            }
+            if ($title === '' || mb_strlen($title) > 180) {
+                $this->fail('Enter a topic name up to 180 characters.');
+            }
+            if ($is_update) {
+                $this->execute('UPDATE private_topics SET subject_id = ?, title = ? WHERE id = ?', [$subject_id, $title, $record_id]);
+            } else {
+                $record_id = $this->insert('INSERT INTO private_topics (subject_id, title) VALUES (?, ?)', [$subject_id, $title]);
+            }
+        } elseif ($kind === 'lessons') {
+            $topic_id = (int) ($data['topic_id'] ?? 0);
+            $title = trim((string) ($data['title'] ?? ''));
+            $content = trim((string) ($data['content'] ?? ''));
+            if (!$this->private_topic_owned($topic_id, $user_id)) {
+                $this->fail('Choose one of your private topics.');
+            }
+            if ($title === '' || mb_strlen($title) > 180 || $content === '') {
+                $this->fail('Enter a lesson title and notes.');
+            }
+            $pdf = $this->save_study_set_pdf('private_pdf');
+            if ($is_update) {
+                if ($pdf) {
+                    $this->execute('UPDATE private_lessons SET topic_id = ?, title = ?, content = ?, pdf_original_name = ?, pdf_data = ? WHERE id = ?', [$topic_id, $title, $content, $pdf['original_name'], $pdf['contents'], $record_id]);
+                } else {
+                    $this->execute('UPDATE private_lessons SET topic_id = ?, title = ?, content = ? WHERE id = ?', [$topic_id, $title, $content, $record_id]);
+                }
+            } else {
+                $record_id = $this->insert(
+                    'INSERT INTO private_lessons (topic_id, title, content, pdf_original_name, pdf_data) VALUES (?, ?, ?, ?, ?)',
+                    [$topic_id, $title, $content, $pdf['original_name'] ?? null, $pdf['contents'] ?? null]
+                );
+            }
+        } else {
+            $topic_id = (int) ($data['topic_id'] ?? 0);
+            $title = trim((string) ($data['title'] ?? ''));
+            $duration = max(1, min(180, (int) ($data['duration_minutes'] ?? 15)));
+            $questions = $data['questions'] ?? [];
+            if (!$this->private_topic_owned($topic_id, $user_id)) {
+                $this->fail('Choose one of your private topics.');
+            }
+            if ($title === '' || mb_strlen($title) > 180 || !is_array($questions) || count($questions) < 1 || count($questions) > 100) {
+                $this->fail('Add a quiz title and between 1 and 100 questions.');
+            }
+            foreach ($questions as $question) {
+                $type = $question['type'] ?? '';
+                $correct = $type === 'identification'
+                    ? trim((string) ($question['correct_option_text'] ?? $question['correct_option'] ?? ''))
+                    : trim((string) ($question['correct_option'] ?? ''));
+                if (trim((string) ($question['question_text'] ?? '')) === '' || !in_array($type, ['multiple_choice', 'true_false', 'identification'], true) || $correct === '') {
+                    $this->fail('Complete each quiz question and its correct answer.');
+                }
+                $options = [
+                    'A' => trim((string) ($question['option_a'] ?? '')),
+                    'B' => trim((string) ($question['option_b'] ?? '')),
+                    'C' => trim((string) ($question['option_c'] ?? '')),
+                    'D' => trim((string) ($question['option_d'] ?? '')),
+                ];
+                if ($type === 'multiple_choice' && (
+                    $options['A'] === '' || $options['B'] === ''
+                    || !in_array($correct, ['A', 'B', 'C', 'D'], true)
+                    || $options[$correct] === ''
+                )) {
+                    $this->fail('Multiple-choice questions need at least two options and a correct answer.');
+                }
+                if ($type === 'true_false' && !in_array($correct, ['True', 'False'], true)) {
+                    $this->fail('Choose True or False as the correct answer.');
+                }
+            }
+            $db = $this->db();
+            $db->raw('START TRANSACTION');
+            try {
+                if ($is_update) {
+                    $this->execute('UPDATE private_quizzes SET topic_id = ?, title = ?, duration_minutes = ? WHERE id = ?', [$topic_id, $title, $duration, $record_id]);
+                    $this->execute('DELETE FROM private_quiz_questions WHERE quiz_id = ?', [$record_id]);
+                } else {
+                    $record_id = $this->insert('INSERT INTO private_quizzes (topic_id, title, duration_minutes) VALUES (?, ?, ?)', [$topic_id, $title, $duration]);
+                }
+                foreach ($questions as $question) {
+                    $type = $question['type'];
+                    $correct = $type === 'identification'
+                        ? trim((string) ($question['correct_option_text'] ?? $question['correct_option']))
+                        : trim((string) $question['correct_option']);
+                    $this->execute(
+                        'INSERT INTO private_quiz_questions (quiz_id, question_text, type, option_a, option_b, option_c, option_d, correct_option, explanation)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        [
+                            $record_id,
+                            trim((string) $question['question_text']),
+                            $type,
+                            $type === 'identification' ? null : ($question['option_a'] ?? null),
+                            $type === 'identification' ? null : ($question['option_b'] ?? null),
+                            $type === 'multiple_choice' ? ($question['option_c'] ?? null) : null,
+                            $type === 'multiple_choice' ? ($question['option_d'] ?? null) : null,
+                            $correct,
+                            trim((string) ($question['explanation'] ?? '')),
+                        ]
+                    );
+                }
+                $db->raw('COMMIT');
+            } catch (Throwable $error) {
+                $db->raw('ROLLBACK');
+                throw $error;
+            }
+        }
+        $this->respond(['ok' => true, 'id' => $record_id], $is_update ? 200 : 201);
+    }
+
+    public function private_lesson_pdf($id)
+    {
+        $user_id = $this->user_id();
+        $lesson = $this->one(
+            'SELECT l.pdf_original_name, l.pdf_data FROM private_lessons l
+             JOIN private_topics t ON t.id = l.topic_id
+             JOIN private_subjects s ON s.id = t.subject_id
+             WHERE l.id = ? AND s.user_id = ?',
+            [(int) $id, $user_id]
+        );
+        if (!$lesson || !$lesson['pdf_data']) {
+            $this->fail('Private lesson PDF not found.', 404);
+        }
+        $filename = preg_replace('/[^A-Za-z0-9._-]/', '_', $lesson['pdf_original_name'] ?: 'lesson.pdf');
+        header('Content-Type: application/pdf');
+        header('Content-Length: ' . strlen($lesson['pdf_data']));
+        header('Content-Disposition: ' . (isset($_GET['download']) ? 'attachment' : 'inline') . '; filename="' . $filename . '"');
+        echo $lesson['pdf_data'];
+        exit;
+    }
+
+    public function private_quiz($id)
+    {
+        $quiz = $this->private_quiz_owned((int) $id, $this->user_id());
+        if (!$quiz) {
+            $this->fail('Private quiz not found.', 404);
+        }
+        $quiz['time'] = (int) $quiz['duration_minutes'];
+        unset($quiz['duration_minutes']);
+        $quiz['questions'] = $this->all(
+            'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d
+             FROM private_quiz_questions WHERE quiz_id = ? ORDER BY id',
+            [(int) $id]
+        );
+        foreach ($quiz['questions'] as &$question) {
+            $question['options'] = $question['type'] === 'true_false'
+                ? ['True', 'False']
+                : array_values(array_filter(
+                    [$question['option_a'], $question['option_b'], $question['option_c'], $question['option_d']],
+                    fn($option) => $option !== null && $option !== ''
+                ));
+            unset($question['option_a'], $question['option_b'], $question['option_c'], $question['option_d']);
+        }
+        unset($question);
+        $this->respond($quiz);
+    }
+
+    public function submit_private_quiz($id)
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $data = $this->body();
+        $quiz_id = (int) $id;
+        if (!$this->private_quiz_owned($quiz_id, $user_id)) {
+            $this->fail('Private quiz not found.', 404);
+        }
+        $questions = $this->all(
+            'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d, correct_option, explanation
+             FROM private_quiz_questions WHERE quiz_id = ? ORDER BY id',
+            [$quiz_id]
+        );
+        if (!$questions) {
+            $this->fail('This quiz does not have any questions yet.', 422);
+        }
+        $answers = $data['answers'] ?? [];
+        if (!is_array($answers)) {
+            $this->fail('Quiz answers must be an object.');
+        }
+        $score = 0;
+        $review = [];
+        foreach ($questions as $question) {
+            $answer = (string) ($answers[$question['id']] ?? '');
+            $correct = $question['type'] === 'identification'
+                ? mb_strtolower(trim((string) $question['correct_option'])) === mb_strtolower(trim($answer))
+                : hash_equals((string) $question['correct_option'], $answer);
+            $score += $correct ? 1 : 0;
+            $options = $question['type'] === 'true_false'
+                ? ['True', 'False']
+                : array_values(array_filter(
+                    [$question['option_a'], $question['option_b'], $question['option_c'], $question['option_d']],
+                    fn($option) => $option !== null && $option !== ''
+                ));
+            $review[] = [
+                'id' => (int) $question['id'],
+                'question' => $question['question'],
+                'type' => $question['type'],
+                'options' => $options,
+                'answer' => $question['type'] === 'identification'
+                    ? $question['correct_option']
+                    : ($question['type'] === 'true_false'
+                        ? array_search($question['correct_option'], $options, true)
+                        : strpos('ABCD', (string) $question['correct_option'])),
+                'correct_option' => $question['correct_option'],
+                'selected_option' => $answer,
+                'correct' => $correct,
+                'explanation' => $question['explanation'],
+            ];
+        }
+        $total = count($questions);
+        $percentage = round(100 * $score / $total, 2);
+        $time_taken = preg_replace('/[^0-9A-Za-z ]/', '', (string) ($data['time_taken'] ?? ''));
+        $this->execute(
+            'INSERT INTO private_quiz_attempts (user_id, quiz_id, score, total_questions, percentage, time_taken) VALUES (?, ?, ?, ?, ?, ?)',
+            [$user_id, $quiz_id, $score, $total, $percentage, substr($time_taken, 0, 20)]
+        );
+        $this->respond([
+            'score' => $score,
+            'total' => $total,
+            'percentage' => $percentage,
+            'review' => $review,
+        ]);
     }
 
     public function quiz($id)
