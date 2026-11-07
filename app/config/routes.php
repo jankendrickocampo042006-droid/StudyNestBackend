@@ -60,6 +60,8 @@ $router->post('/api/auth/reset-password', 'StudyNestAuthApi::reset_password');
 $router->post('/api/auth/logout', 'StudyNestAuthApi::logout');
 $router->get('/api/profile', 'StudyNestLearningApi::profile');
 $router->put('/api/profile', 'StudyNestLearningApi::profile');
+$router->get('/api/certificates', 'StudyNestLearningApi::certificates');
+$router->get('/api/certificates/{id}/download', 'StudyNestLearningApi::download_certificate');
 $router->get('/api/study-sets', 'StudyNestLearningApi::study_sets');
 $router->post('/api/study-sets', 'StudyNestLearningApi::study_sets');
 $router->get('/api/study-sets/{id}/pdf', 'StudyNestLearningApi::study_set_pdf');

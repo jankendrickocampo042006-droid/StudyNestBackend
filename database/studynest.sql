@@ -239,3 +239,17 @@ CREATE TABLE user_activities (
     INDEX user_activities_user_date_idx (user_id, created_at),
     CONSTRAINT user_activities_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE certificates (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    subject_id INT UNSIGNED NOT NULL,
+    student_name VARCHAR(100) NOT NULL,
+    subject_name VARCHAR(150) NOT NULL,
+    teacher_name VARCHAR(100) NOT NULL,
+    certificate_code VARCHAR(24) NOT NULL UNIQUE,
+    issued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY certificates_user_subject_unique (user_id, subject_id),
+    INDEX certificates_user_issued_idx (user_id, issued_at),
+    CONSTRAINT certificates_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -5,6 +5,191 @@ require_once __DIR__ . '/StudyNestApiBase.php';
 
 class StudyNestLearningApi extends StudyNestApiBase
 {
+    private function issue_completed_subject_certificates($user_id)
+    {
+        $eligible_subjects = $this->all(<<<'SQL'
+            SELECT s.id AS subject_id, s.name AS subject_name,
+                   student.full_name AS student_name, teacher.full_name AS teacher_name
+            FROM subjects s
+            JOIN users teacher ON teacher.id = s.owner_id
+                AND (teacher.teacher_status = 'approved'
+                     OR (teacher.role = 'teacher' AND teacher.teacher_status IS NULL))
+            JOIN users student ON student.id = ?
+            WHERE EXISTS (
+                SELECT 1 FROM topics t JOIN lessons l ON l.topic_id = t.id
+                WHERE t.subject_id = s.id
+            )
+            AND EXISTS (
+                SELECT 1 FROM topics t JOIN quizzes q ON q.topic_id = t.id
+                WHERE t.subject_id = s.id
+            )
+            AND student.role = 'user'
+            AND (student.teacher_status IS NULL OR student.teacher_status = 'rejected')
+            AND NOT EXISTS (
+                SELECT 1
+                FROM topics t JOIN lessons l ON l.topic_id = t.id
+                WHERE t.subject_id = s.id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM lesson_reviews lr
+                      WHERE lr.user_id = student.id AND lr.lesson_id = l.id
+                  )
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM topics t JOIN quizzes q ON q.topic_id = t.id
+                WHERE t.subject_id = s.id
+                  AND (
+                      NOT EXISTS (
+                          SELECT 1 FROM quiz_questions qq WHERE qq.quiz_id = q.id
+                      )
+                      OR NOT EXISTS (
+                          SELECT 1 FROM quiz_attempts qa
+                          WHERE qa.user_id = student.id AND qa.quiz_id = q.id AND qa.percentage >= 70
+                      )
+                  )
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM certificates c
+                WHERE c.user_id = student.id AND c.subject_id = s.id
+            )
+            SQL, [(int) $user_id]);
+
+        foreach ($eligible_subjects as $subject) {
+            $code = 'SN-' . date('Y') . '-' . strtoupper(bin2hex(random_bytes(5)));
+            $this->execute(
+                'INSERT IGNORE INTO certificates
+                    (user_id, subject_id, student_name, subject_name, teacher_name, certificate_code)
+                 VALUES (?, ?, ?, ?, ?, ?)',
+                [
+                    (int) $user_id,
+                    (int) $subject['subject_id'],
+                    $subject['student_name'],
+                    $subject['subject_name'],
+                    $subject['teacher_name'],
+                    $code,
+                ]
+            );
+        }
+    }
+
+    private function certificate_pdf_string($value)
+    {
+        $source = (string) $value;
+        $value = iconv('UTF-8', 'Windows-1252//TRANSLIT//IGNORE', $source);
+        if ($value === false) {
+            $value = preg_replace('/[^\x20-\x7E]/', '?', $source);
+        }
+        return str_replace(["\\", '(', ')', "\r", "\n"], ["\\\\", '\\(', '\\)', ' ', ' '], $value);
+    }
+
+    private function certificate_pdf_text($text, $font, $size, $y, $color = '0.16 0.25 0.20', $x = null, $max_width = 760)
+    {
+        $text = $this->certificate_pdf_string($text);
+        while ($size > 8 && strlen($text) * $size * 0.52 > $max_width) {
+            $size--;
+        }
+        $width = strlen($text) * $size * 0.52;
+        $x = $x === null ? max(40, (842 - $width) / 2) : $x;
+        return sprintf(
+            "BT /%s %d Tf %s rg 1 0 0 1 %.2f %d Tm (%s) Tj ET\n",
+            $font,
+            $size,
+            $color,
+            $x,
+            $y,
+            $text
+        );
+    }
+
+    private function render_certificate_pdf(array $certificate)
+    {
+        $content = "q\n";
+        $content .= "0.99 0.99 0.97 rg 0 0 842 595 re f\n";
+        $content .= "0.12 0.25 0.20 rg 0 0 842 12 re f\n";
+        $content .= "0.18 0.34 0.27 RG 2 w 24 24 794 547 re S\n";
+        $content .= "0.78 0.66 0.40 RG 0.8 w 34 34 774 527 re S\n";
+        $content .= "0.91 0.93 0.87 rg 44 447 754 94 re f\n";
+        $content .= "0.78 0.66 0.40 RG 1 w 44 447 m 798 447 l S\n";
+        $content .= "0.78 0.66 0.40 rg 72 476 4 4 re f\n";
+        $content .= "0.78 0.66 0.40 rg 766 476 4 4 re f\n";
+        $content .= "0.18 0.34 0.27 RG 1.2 w 300 372 m 542 372 l S\n";
+        $content .= "0.78 0.66 0.40 RG 1 w 226 250 m 616 250 l S\n";
+        $content .= "Q\n";
+        $content .= $this->certificate_pdf_text('STUDYNEST', 'F3', 14, 508, '0.18 0.34 0.27');
+        $content .= $this->certificate_pdf_text('LEARNING  /  ACHIEVEMENT', 'F1', 9, 489, '0.42 0.48 0.43');
+        $content .= $this->certificate_pdf_text('CERTIFICATE OF COMPLETION', 'F3', 28, 406, '0.13 0.25 0.19');
+        $content .= $this->certificate_pdf_text('This certificate is awarded to', 'F2', 15, 345, '0.34 0.39 0.35');
+        $content .= $this->certificate_pdf_text($certificate['student_name'], 'F3', 26, 298, '0.18 0.34 0.27');
+        $content .= $this->certificate_pdf_text('for successfully completing', 'F2', 14, 269, '0.34 0.39 0.35');
+        $content .= $this->certificate_pdf_text($certificate['subject_name'], 'F3', 22, 225, '0.13 0.25 0.19');
+        $content .= $this->certificate_pdf_text('Conducted through the StudyNest learning platform.', 'F2', 12, 193, '0.34 0.39 0.35');
+        $content .= $this->certificate_pdf_text('In recognition of this achievement and the learning credit earned.', 'F2', 12, 174, '0.34 0.39 0.35');
+        $content .= $this->certificate_pdf_text($certificate['teacher_name'], 'F3', 12, 132, '0.18 0.34 0.27', 150, 430);
+        $content .= $this->certificate_pdf_text('COURSE INSTRUCTOR', 'F1', 8, 116, '0.42 0.46 0.42', 150, 430);
+        $content .= $this->certificate_pdf_text('ISSUED  ' . strtoupper(date('F j, Y', strtotime($certificate['issued_at']))), 'F1', 9, 132, '0.42 0.46 0.42', 485, 210);
+        $content .= $this->certificate_pdf_text('Certificate ID  ' . $certificate['certificate_code'], 'F1', 8, 58, '0.42 0.46 0.42');
+
+        $objects = [
+            '<< /Type /Catalog /Pages 2 0 R >>',
+            '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R >> >> /Contents 7 0 R >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic /Encoding /WinAnsiEncoding >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>',
+            '<< /Length ' . strlen($content) . " >>\nstream\n" . $content . "endstream",
+        ];
+        $pdf = "%PDF-1.4\n";
+        $offsets = [0];
+        foreach ($objects as $index => $object) {
+            $offsets[] = strlen($pdf);
+            $pdf .= ($index + 1) . " 0 obj\n" . $object . "\nendobj\n";
+        }
+        $xref_offset = strlen($pdf);
+        $pdf .= "xref\n0 " . (count($objects) + 1) . "\n0000000000 65535 f \n";
+        foreach (array_slice($offsets, 1) as $offset) {
+            $pdf .= sprintf("%010d 00000 n \n", $offset);
+        }
+        $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\n";
+        $pdf .= "startxref\n" . $xref_offset . "\n%%EOF";
+        return $pdf;
+    }
+
+    public function certificates()
+    {
+        $user_id = $this->user_id();
+        $user = $this->current_user();
+        if (!$user || $user['role'] !== 'user') {
+            $this->respond([]);
+        }
+        $this->issue_completed_subject_certificates($user_id);
+        $this->respond($this->all(
+            'SELECT id, subject_name, teacher_name, certificate_code, issued_at
+             FROM certificates WHERE user_id = ? ORDER BY issued_at DESC, id DESC',
+            [$user_id]
+        ));
+    }
+
+    public function download_certificate($id)
+    {
+        $user_id = $this->user_id();
+        $certificate = $this->one(
+            'SELECT student_name, subject_name, teacher_name, certificate_code, issued_at
+             FROM certificates WHERE id = ? AND user_id = ?',
+            [(int) $id, $user_id]
+        );
+        if (!$certificate) {
+            $this->fail('Certificate not found.', 404);
+        }
+        $pdf = $this->render_certificate_pdf($certificate);
+        header('Content-Type: application/pdf');
+        header('Content-Length: ' . strlen($pdf));
+        header('Content-Disposition: attachment; filename="studynest-certificate-' . $certificate['certificate_code'] . '.pdf"');
+        header('Cache-Control: private, no-store');
+        header('X-Content-Type-Options: nosniff');
+        echo $pdf;
+        exit;
+    }
+
     private function assert_teacher_subject_owner($owner_id)
     {
         $user = $this->current_user();
@@ -699,7 +884,7 @@ class StudyNestLearningApi extends StudyNestApiBase
         $filename = preg_replace('/[^A-Za-z0-9._-]/', '_', $set['pdf_original_name'] ?: 'study-material.pdf');
         header('Content-Type: application/pdf');
         header('Content-Length: ' . strlen($set['pdf_data']));
-        header('Content-Disposition: inline; filename="' . $filename . '"');
+        header('Content-Disposition: ' . (isset($_GET['download']) ? 'attachment' : 'inline') . '; filename="' . $filename . '"');
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: private, no-store');
         echo $set['pdf_data'];
@@ -724,6 +909,7 @@ class StudyNestLearningApi extends StudyNestApiBase
              ON DUPLICATE KEY UPDATE reviewed_at = NOW()',
             [$user_id, (int) $lesson_id]
         );
+        $this->issue_completed_subject_certificates($user_id);
         $lesson = $this->one(
             'SELECT l.title, s.name AS subject FROM lessons l JOIN topics t ON t.id = l.topic_id
              JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
@@ -1259,6 +1445,7 @@ class StudyNestLearningApi extends StudyNestApiBase
              VALUES (?, ?, ?, ?, ?, ?, NOW())',
             [$user_id, $quiz_id, $score, count($questions), $percentage, substr((string) ($data['time_taken'] ?? '00:00'), 0, 20)]
         );
+        $this->issue_completed_subject_certificates($user_id);
         $quiz = $this->one(
             'SELECT q.title, s.name AS subject FROM quizzes q JOIN topics t ON t.id = q.topic_id
              JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
