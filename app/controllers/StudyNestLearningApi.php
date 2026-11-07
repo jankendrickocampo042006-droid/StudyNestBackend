@@ -19,10 +19,6 @@ class StudyNestLearningApi extends StudyNestApiBase
                 SELECT 1 FROM topics t JOIN lessons l ON l.topic_id = t.id
                 WHERE t.subject_id = s.id
             )
-            AND EXISTS (
-                SELECT 1 FROM topics t JOIN quizzes q ON q.topic_id = t.id
-                WHERE t.subject_id = s.id
-            )
             AND student.role = 'user'
             AND (student.teacher_status IS NULL OR student.teacher_status = 'rejected')
             AND NOT EXISTS (
@@ -587,9 +583,10 @@ class StudyNestLearningApi extends StudyNestApiBase
 
     public function lesson_pdf($id)
     {
-        $this->user_id();
+        $user_id = $this->user_id();
         $lesson = $this->one(
-            'SELECT l.pdf_storage_name, l.pdf_original_name, l.pdf_data, s.owner_id
+            'SELECT l.id, l.title, l.pdf_storage_name, l.pdf_original_name, l.pdf_data,
+                    s.owner_id, s.name AS subject
              FROM lessons l JOIN topics t ON t.id = l.topic_id
              JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
             [(int) $id]
@@ -611,6 +608,18 @@ class StudyNestLearningApi extends StudyNestApiBase
             if (!is_file($path) || (new finfo(FILEINFO_MIME_TYPE))->file($path) !== 'application/pdf') {
                 $this->fail('The lesson PDF is unavailable. Upload it again to restore access.', 404);
             }
+        }
+
+        if (!isset($_GET['download'])) {
+            $viewed_pdfs = $this->session->userdata('studynest_viewed_pdfs') ?: [];
+            $now = time();
+            foreach ($viewed_pdfs as $viewed_id => $viewed_at) {
+                if ($now - (int) $viewed_at > 600) {
+                    unset($viewed_pdfs[$viewed_id]);
+                }
+            }
+            $viewed_pdfs[(int) $lesson['id']] = $now;
+            $this->session->set_userdata('studynest_viewed_pdfs', $viewed_pdfs);
         }
 
         $filename = str_replace(["\r", "\n", '"'], '', $lesson['pdf_original_name'] ?: 'lesson.pdf');
@@ -910,7 +919,9 @@ class StudyNestLearningApi extends StudyNestApiBase
         $user_id = $this->user_id();
         $this->verify_csrf();
         $lesson = $this->one(
-            'SELECT l.id, s.owner_id FROM lessons l JOIN topics t ON t.id = l.topic_id
+            'SELECT l.id, l.title, l.pdf_storage_name, l.pdf_data,
+                    s.owner_id, s.name AS subject
+             FROM lessons l JOIN topics t ON t.id = l.topic_id
              JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
             [(int) $lesson_id]
         );
@@ -918,20 +929,57 @@ class StudyNestLearningApi extends StudyNestApiBase
             $this->fail('Lesson not found.', 404);
         }
         $this->assert_teacher_subject_owner($lesson['owner_id']);
-        $this->execute(
-            'INSERT INTO lesson_reviews (user_id, lesson_id, reviewed_at) VALUES (?, ?, NOW())
-             ON DUPLICATE KEY UPDATE reviewed_at = NOW()',
-            [$user_id, (int) $lesson_id]
-        );
-        $this->issue_completed_subject_certificates($user_id);
-        $lesson = $this->one(
-            'SELECT l.title, s.name AS subject FROM lessons l JOIN topics t ON t.id = l.topic_id
-             JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
-            [(int) $lesson_id]
-        );
-        $duration = min(7200, max(0, (int) ($_SERVER['HTTP_X_STUDY_DURATION'] ?? 0)));
-        $this->activity($user_id, 'lesson_reviewed', $lesson['title'], $lesson['subject'], $duration);
+        if ($lesson['pdf_storage_name'] || ($lesson['pdf_data'] !== null && $lesson['pdf_data'] !== '')) {
+            $this->fail('View the attached PDF to mark this lesson as read.', 409);
+        }
+        $duration = min(7200, max(0, (int) ($this->body()['duration_seconds'] ?? 0)));
+        $this->record_lesson_review($user_id, $lesson, $duration);
         $this->respond(['ok' => true]);
+    }
+
+    public function lesson_pdf_viewed($lesson_id)
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $lesson_id = (int) $lesson_id;
+        $viewed_pdfs = $this->session->userdata('studynest_viewed_pdfs') ?: [];
+        $viewed_at = (int) ($viewed_pdfs[$lesson_id] ?? 0);
+        if (!$viewed_at || time() - $viewed_at > 600) {
+            $this->fail('Open the attached PDF before marking this lesson as read.', 409);
+        }
+
+        $lesson = $this->one(
+            'SELECT l.id, l.title, s.owner_id, s.name AS subject
+             FROM lessons l JOIN topics t ON t.id = l.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
+            [$lesson_id]
+        );
+        if (!$lesson) {
+            $this->fail('Lesson not found.', 404);
+        }
+        $this->assert_teacher_subject_owner($lesson['owner_id']);
+        unset($viewed_pdfs[$lesson_id]);
+        $this->session->set_userdata('studynest_viewed_pdfs', $viewed_pdfs);
+        $this->record_lesson_review($user_id, $lesson);
+        $this->respond(['ok' => true]);
+    }
+
+    private function record_lesson_review($user_id, array $lesson, $duration = 0)
+    {
+        $inserted = $this->execute(
+            'INSERT IGNORE INTO lesson_reviews (user_id, lesson_id, reviewed_at) VALUES (?, ?, NOW())',
+            [(int) $user_id, (int) $lesson['id']]
+        );
+        if ($inserted > 0) {
+            $this->activity(
+                (int) $user_id,
+                'lesson_reviewed',
+                $lesson['title'],
+                $lesson['subject'],
+                min(7200, max(0, (int) $duration))
+            );
+        }
+        $this->issue_completed_subject_certificates((int) $user_id);
     }
 
     public function schedules()
