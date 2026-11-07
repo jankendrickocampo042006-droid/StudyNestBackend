@@ -409,24 +409,18 @@ class StudyNestManageApi extends StudyNestApiBase
         }
         $pdf = $kind === 'lessons' ? $this->save_lesson_pdf() : null;
         if ($pdf) {
-            $values['pdf_storage_name'] = $pdf['storage_name'];
+            $values['pdf_storage_name'] = null;
             $values['pdf_original_name'] = $pdf['original_name'];
+            $values['pdf_data'] = $pdf['contents'];
         }
         $columns = array_keys($values);
-        try {
-            $id = $this->insert(
-                'INSERT INTO ' . $config['table'] . ' (' . implode(', ', $columns) . ') VALUES (' .
-                implode(', ', array_fill(0, count($columns), '?')) . ')',
-                array_values($values)
-            );
-        } catch (Throwable $error) {
-            if ($pdf) {
-                $this->delete_private_lesson_pdf($pdf['storage_name']);
-            }
-            throw $error;
-        }
+        $id = $this->insert(
+            'INSERT INTO ' . $config['table'] . ' (' . implode(', ', $columns) . ') VALUES (' .
+            implode(', ', array_fill(0, count($columns), '?')) . ')',
+            array_values($values)
+        );
         $this->activity($user_id, 'content_created', $values['name'] ?? $values['title'], ucfirst(rtrim($kind, 's')));
-        unset($values['pdf_storage_name']);
+        unset($values['pdf_storage_name'], $values['pdf_data']);
         $this->respond(array_merge(['id' => $id], $values), 201);
     }
 
@@ -453,29 +447,24 @@ class StudyNestManageApi extends StudyNestApiBase
         $pdf = $kind === 'lessons' ? $this->save_lesson_pdf() : null;
         $remove_pdf = $kind === 'lessons' && ($data['remove_pdf_attachment'] ?? '') === '1';
         if ($pdf) {
-            $values['pdf_storage_name'] = $pdf['storage_name'];
+            $values['pdf_storage_name'] = null;
             $values['pdf_original_name'] = $pdf['original_name'];
+            $values['pdf_data'] = $pdf['contents'];
         } elseif ($remove_pdf) {
             $values['pdf_storage_name'] = null;
             $values['pdf_original_name'] = null;
+            $values['pdf_data'] = null;
         }
         $assignments = implode(', ', array_map(fn($field) => $field . ' = ?', array_keys($values)));
-        try {
-            $this->execute(
-                'UPDATE ' . $config['table'] . ' SET ' . $assignments . ' WHERE id = ?',
-                array_merge(array_values($values), [$id])
-            );
-        } catch (Throwable $error) {
-            if ($pdf) {
-                $this->delete_private_lesson_pdf($pdf['storage_name']);
-            }
-            throw $error;
-        }
+        $this->execute(
+            'UPDATE ' . $config['table'] . ' SET ' . $assignments . ' WHERE id = ?',
+            array_merge(array_values($values), [$id])
+        );
         if ($kind === 'lessons' && ($pdf || $remove_pdf)) {
             $this->delete_private_lesson_pdf($existing['pdf_storage_name']);
         }
         $this->activity($user_id, 'content_updated', $values['name'] ?? $values['title'], ucfirst(rtrim($kind, 's')));
-        unset($values['pdf_storage_name']);
+        unset($values['pdf_storage_name'], $values['pdf_data']);
         $this->respond(array_merge(['id' => $id], $values));
     }
 

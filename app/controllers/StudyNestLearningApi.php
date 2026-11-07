@@ -589,28 +589,42 @@ class StudyNestLearningApi extends StudyNestApiBase
     {
         $this->user_id();
         $lesson = $this->one(
-            'SELECT l.pdf_storage_name, l.pdf_original_name, s.owner_id
+            'SELECT l.pdf_storage_name, l.pdf_original_name, l.pdf_data, s.owner_id
              FROM lessons l JOIN topics t ON t.id = l.topic_id
              JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
             [(int) $id]
         );
-        if (!$lesson || !$lesson['pdf_storage_name']) {
+        if (!$lesson || (!$lesson['pdf_storage_name'] && ($lesson['pdf_data'] === null || $lesson['pdf_data'] === ''))) {
             $this->fail('This lesson does not have an attached PDF.', 404);
         }
         $this->assert_teacher_subject_owner($lesson['owner_id']);
-        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'lesson-pdfs';
-        $path = $directory . DIRECTORY_SEPARATOR . basename($lesson['pdf_storage_name']);
-        if (!is_file($path) || (new finfo(FILEINFO_MIME_TYPE))->file($path) !== 'application/pdf') {
-            $this->fail('The lesson PDF is unavailable.', 404);
+        $pdf = null;
+        $path = null;
+        if ($lesson['pdf_data'] !== null && $lesson['pdf_data'] !== '') {
+            $pdf = $lesson['pdf_data'];
+            if (substr($pdf, 0, 5) !== '%PDF-') {
+                $this->fail('The lesson PDF is unavailable.', 404);
+            }
+        } else {
+            $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'lesson-pdfs';
+            $path = $directory . DIRECTORY_SEPARATOR . basename($lesson['pdf_storage_name']);
+            if (!is_file($path) || (new finfo(FILEINFO_MIME_TYPE))->file($path) !== 'application/pdf') {
+                $this->fail('The lesson PDF is unavailable. Upload it again to restore access.', 404);
+            }
         }
+
         $filename = str_replace(["\r", "\n", '"'], '', $lesson['pdf_original_name'] ?: 'lesson.pdf');
         $disposition = isset($_GET['download']) ? 'attachment' : 'inline';
         header('Content-Type: application/pdf');
-        header('Content-Length: ' . filesize($path));
+        header('Content-Length: ' . ($pdf !== null ? strlen($pdf) : filesize($path)));
         header('Content-Disposition: ' . $disposition . '; filename="lesson.pdf"; filename*=UTF-8\'\'' . rawurlencode($filename));
         header('Cache-Control: private, no-store');
         header('X-Content-Type-Options: nosniff');
-        readfile($path);
+        if ($pdf !== null) {
+            echo $pdf;
+        } else {
+            readfile($path);
+        }
         exit;
     }
 

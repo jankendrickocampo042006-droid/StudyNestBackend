@@ -179,6 +179,21 @@ PREPARE studynest_repair_stmt FROM @studynest_sql;
 EXECUTE studynest_repair_stmt;
 DEALLOCATE PREPARE studynest_repair_stmt;
 
+SET @studynest_sql = IF(
+    (SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'lessons' AND COLUMN_NAME = 'pdf_data') = 0,
+    'ALTER TABLE lessons ADD COLUMN pdf_data LONGBLOB NULL AFTER pdf_original_name',
+    IF(
+        (SELECT DATA_TYPE FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = @studynest_schema AND TABLE_NAME = 'lessons' AND COLUMN_NAME = 'pdf_data') <> 'longblob',
+        'ALTER TABLE lessons MODIFY COLUMN pdf_data LONGBLOB NULL',
+        'SELECT 1'
+    )
+);
+PREPARE studynest_repair_stmt FROM @studynest_sql;
+EXECUTE studynest_repair_stmt;
+DEALLOCATE PREPARE studynest_repair_stmt;
+
 CREATE TABLE IF NOT EXISTS sessions (
     id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     ip_address VARCHAR(45) NOT NULL,

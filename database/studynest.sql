@@ -57,6 +57,7 @@ CREATE TABLE lessons (
     content LONGTEXT NOT NULL,
     pdf_storage_name VARCHAR(80) NULL,
     pdf_original_name VARCHAR(180) NULL,
+    pdf_data LONGBLOB NULL,
     INDEX lessons_topic_idx (topic_id),
     CONSTRAINT lessons_topic_fk FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

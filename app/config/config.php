@@ -406,7 +406,7 @@ $config['security_headers'] = [
         ],
         'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'headers'         => 'Authorization, Content-Type, X-Requested-With, X-CSRF-Token',
+        'headers'         => 'Authorization, Content-Type, X-Requested-With, X-CSRF-Token, X-Study-Duration',
         'max_age'         => 600,
     ],
 ];

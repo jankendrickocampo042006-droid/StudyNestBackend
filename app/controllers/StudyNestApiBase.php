@@ -202,15 +202,11 @@ class StudyNestApiBase extends Controller
         if ($original_name === '' || strlen($original_name) > 180) {
             $this->fail('The PDF filename must be no longer than 180 characters.');
         }
-        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'lesson-pdfs';
-        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
-            throw new RuntimeException('Private lesson PDF storage could not be created.');
+        $contents = file_get_contents($file['tmp_name']);
+        if ($contents === false || strlen($contents) !== $actual_size) {
+            throw new RuntimeException('The lesson PDF could not be read for secure storage.');
         }
-        $storage_name = bin2hex(random_bytes(24)) . '.pdf';
-        if (!move_uploaded_file($file['tmp_name'], $directory . DIRECTORY_SEPARATOR . $storage_name)) {
-            throw new RuntimeException('The lesson PDF could not be stored securely.');
-        }
-        return ['storage_name' => $storage_name, 'original_name' => $original_name];
+        return ['contents' => $contents, 'original_name' => $original_name];
     }
 
     protected function delete_private_lesson_pdf($storage_name)
