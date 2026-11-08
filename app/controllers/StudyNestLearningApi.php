@@ -1297,6 +1297,30 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->respond($subjects);
     }
 
+    private function private_quiz_ai_quota_data($user_id)
+    {
+        $usage = $this->one(
+            'SELECT generation_count,
+                    GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), DATE_ADD(window_started_at, INTERVAL 1 DAY))) AS reset_in_seconds
+             FROM private_quiz_ai_usage WHERE user_id = ?',
+            [(int) $user_id]
+        );
+        $reset_in_seconds = (int) ($usage['reset_in_seconds'] ?? 0);
+        $used = $reset_in_seconds > 0 ? (int) ($usage['generation_count'] ?? 0) : 0;
+        $limit = 3;
+        return [
+            'limit' => $limit,
+            'remaining' => max(0, $limit - $used),
+            'reset_in_seconds' => $reset_in_seconds,
+            'max_questions_per_generation' => 10,
+        ];
+    }
+
+    public function private_quiz_ai_quota()
+    {
+        $this->respond($this->private_quiz_ai_quota_data($this->user_id()));
+    }
+
     public function generate_private_quiz()
     {
         $user_id = $this->user_id();
@@ -1391,8 +1415,12 @@ class StudyNestLearningApi extends StudyNestApiBase
             );
             if (!$usage || (int) $usage['generation_count'] > 3) {
                 $db->raw('ROLLBACK');
-                $this->fail('You have reached the limit of 3 AI quiz generation attempts per 24 hours. Please try again later.', 429);
+                $this->respond([
+                    'error' => 'You have used all 3 AI quiz generations for this 24-hour period.',
+                    'quota' => $this->private_quiz_ai_quota_data($user_id),
+                ], 429);
             }
+            $quota = $this->private_quiz_ai_quota_data($user_id);
             $db->raw('COMMIT');
         } catch (\Throwable $error) {
             $db->raw('ROLLBACK');
@@ -1538,7 +1566,12 @@ class StudyNestLearningApi extends StudyNestApiBase
             $questions[] = ['type' => $question_type] + $normalized;
         }
 
-        $this->respond(['title' => $title, 'questions' => $questions, 'source_truncated' => $source_truncated]);
+        $this->respond([
+            'title' => $title,
+            'questions' => $questions,
+            'source_truncated' => $source_truncated,
+            'quota' => $quota,
+        ]);
     }
 
     public function private_library_resource($kind, $id = null)
