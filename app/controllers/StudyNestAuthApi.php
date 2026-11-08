@@ -24,6 +24,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         $phase = 'reading request';
         try {
             $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
+            $this->verify_recaptcha($data['recaptcha_token'] ?? '');
             $name = $this->require_text($data['name'] ?? $data['full_name'] ?? '', 'Full name', 100);
             $email = trim((string) ($data['email'] ?? ''));
             $password = (string) ($data['password'] ?? '');
@@ -286,6 +287,7 @@ class StudyNestAuthApi extends StudyNestApiBase
     {
         $this->verify_csrf();
         $data = $this->body();
+        $this->verify_recaptcha($data['recaptcha_token'] ?? '');
         $email = trim((string) ($data['email'] ?? ''));
         $password = (string) ($data['password'] ?? '');
         $user = $this->one(
@@ -325,12 +327,14 @@ class StudyNestAuthApi extends StudyNestApiBase
     public function google_login()
     {
         $this->verify_csrf();
+        $data = $this->body();
+        $this->verify_recaptcha($data['recaptcha_token'] ?? '');
         $client_id = trim((string) getenv('GOOGLE_CLIENT_ID'));
         if ($client_id === '') {
             $this->fail('Google sign-in is not configured on the backend.', 503);
         }
 
-        $credential = trim((string) ($this->body()['credential'] ?? ''));
+        $credential = trim((string) ($data['credential'] ?? ''));
         if ($credential === '' || strlen($credential) > 16384) {
             $this->fail('Google sign-in could not be verified. Please try again.', 401);
         }
@@ -431,5 +435,61 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->session->sess_regenerate(true);
         $this->session->set_userdata('studynest_csrf', bin2hex(random_bytes(32)));
         $this->respond(['ok' => true, 'csrf_token' => $this->session->userdata('studynest_csrf')]);
+    }
+
+    private function verify_recaptcha($token)
+    {
+        $token = trim((string) $token);
+        if ($token === '') {
+            $this->fail('Please complete the reCAPTCHA checkbox and try again.', 400);
+        }
+        if (strlen($token) > 4096) {
+            $this->fail('reCAPTCHA verification failed. Please try the checkbox again.', 400);
+        }
+
+        $secret = trim((string) getenv('RECAPTCHA_SECRET_KEY'));
+        if ($secret === '') {
+            error_log('StudyNest reCAPTCHA verification is unavailable: RECAPTCHA_SECRET_KEY is not configured.');
+            $this->fail('Human verification is not configured on the server. Please contact the site administrator.', 503);
+        }
+
+        try {
+            $response = (new \GuzzleHttp\Client([
+                'connect_timeout' => 5,
+                'timeout' => 10,
+                'http_errors' => false,
+            ]))->post('https://www.google.com/recaptcha/api/siteverify', [
+                'form_params' => [
+                    'secret' => $secret,
+                    'response' => $token,
+                ],
+            ]);
+        } catch (\GuzzleHttp\Exception\GuzzleException $error) {
+            error_log('StudyNest reCAPTCHA verification request failed: ' . $error->getMessage());
+            $this->fail('Human verification is temporarily unavailable. Please try again.', 503);
+        }
+
+        if ($response->getStatusCode() < 200 || $response->getStatusCode() >= 300) {
+            error_log('StudyNest reCAPTCHA verification returned HTTP ' . $response->getStatusCode() . '.');
+            $this->fail('Human verification is temporarily unavailable. Please try again.', 503);
+        }
+
+        $verification = json_decode((string) $response->getBody(), true);
+        if (!is_array($verification) || ($verification['success'] ?? false) !== true) {
+            $this->fail('reCAPTCHA verification failed. Please try the checkbox again.', 400);
+        }
+
+        $configured_hostnames = trim((string) getenv('RECAPTCHA_ALLOWED_HOSTNAMES'));
+        $allowed_hostnames = $configured_hostnames === ''
+            ? ['localhost', '127.0.0.1', 'studynest-r85g.onrender.com']
+            : explode(',', $configured_hostnames);
+        $allowed_hostnames = array_map(static function ($hostname) {
+            return strtolower(trim($hostname));
+        }, $allowed_hostnames);
+        $hostname = strtolower(trim((string) ($verification['hostname'] ?? '')));
+        if ($hostname === '' || !in_array($hostname, $allowed_hostnames, true)) {
+            error_log('StudyNest reCAPTCHA verification returned an unapproved hostname.');
+            $this->fail('reCAPTCHA verification failed for this website.', 400);
+        }
     }
 }
