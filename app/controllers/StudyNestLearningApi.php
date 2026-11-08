@@ -1353,7 +1353,7 @@ class StudyNestLearningApi extends StudyNestApiBase
                 $this->fail('This PDF has more than 150 pages. Split it into a smaller study section and try again.');
             }
             $source_text = trim(preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/u', ' ', $document->getText()) ?? '');
-        } catch (\Exception $error) {
+        } catch (\Throwable $error) {
             error_log('StudyNest AI quiz PDF extraction failed: ' . $error->getMessage());
             $this->fail('StudyNest could not read this PDF. It may be damaged or image-only; use a text-based PDF instead.');
         }
