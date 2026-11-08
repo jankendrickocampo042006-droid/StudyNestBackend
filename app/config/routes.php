@@ -74,6 +74,7 @@ $router->get('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');
 $router->put('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');
 $router->delete('/api/study-sets/{id}', 'StudyNestLearningApi::study_set');
 $router->get('/api/my-library', 'StudyNestLearningApi::private_library');
+$router->post('/api/my-library/generate-quiz', 'StudyNestLearningApi::generate_private_quiz');
 $router->post('/api/my-library/{kind}', 'StudyNestLearningApi::private_library_resource');
 $router->put('/api/my-library/{kind}/{id}', 'StudyNestLearningApi::private_library_resource');
 $router->delete('/api/my-library/{kind}/{id}', 'StudyNestLearningApi::private_library_resource');
