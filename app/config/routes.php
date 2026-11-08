@@ -86,6 +86,7 @@ $router->delete('/api/schedules/{id}', 'StudyNestLearningApi::schedule');
 $router->get('/api/favorites', 'StudyNestLearningApi::favorites');
 $router->post('/api/favorites', 'StudyNestLearningApi::favorites');
 $router->delete('/api/favorites/{id}', 'StudyNestLearningApi::favorite');
+$router->post('/api/subject-favorites', 'StudyNestLearningApi::subject_favorites');
 $router->post('/api/lessons/{id}/review', 'StudyNestLearningApi::review_lesson');
 $router->post('/api/lessons/{id}/viewed', 'StudyNestLearningApi::lesson_pdf_viewed');
 $router->get('/api/lessons/{id}/pdf', 'StudyNestLearningApi::lesson_pdf');

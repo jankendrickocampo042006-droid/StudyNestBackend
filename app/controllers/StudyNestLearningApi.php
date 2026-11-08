@@ -9,8 +9,11 @@ class StudyNestLearningApi extends StudyNestApiBase
     {
         $eligible_subjects = $this->all(<<<'SQL'
             SELECT s.id AS subject_id, s.name AS subject_name,
-                   student.full_name AS student_name, teacher.full_name AS teacher_name
+                   student.full_name AS student_name, teacher.full_name AS teacher_name,
+                   COALESCE(certificate_settings.required_completion_percent, 100) AS required_completion_percent,
+                   COALESCE(certificate_settings.minimum_quiz_score, 70) AS minimum_quiz_score
             FROM subjects s
+            LEFT JOIN subject_certificate_settings certificate_settings ON certificate_settings.subject_id = s.id
             JOIN users teacher ON teacher.id = s.owner_id
                 AND (teacher.teacher_status = 'approved'
                      OR (teacher.role = 'teacher' AND teacher.teacher_status IS NULL))
@@ -19,16 +22,18 @@ class StudyNestLearningApi extends StudyNestApiBase
                 SELECT 1 FROM topics t JOIN lessons l ON l.topic_id = t.id
                 WHERE t.subject_id = s.id
             )
+            AND COALESCE(certificate_settings.enabled, 0) = 1
             AND student.role = 'user'
             AND (student.teacher_status IS NULL OR student.teacher_status = 'rejected')
-            AND NOT EXISTS (
-                SELECT 1
+            AND (
+                SELECT COUNT(*)
+                FROM topics t JOIN lessons l ON l.topic_id = t.id
+                JOIN lesson_reviews lr ON lr.user_id = student.id AND lr.lesson_id = l.id
+                WHERE t.subject_id = s.id
+            ) * 100 >= COALESCE(certificate_settings.required_completion_percent, 100) * (
+                SELECT COUNT(*)
                 FROM topics t JOIN lessons l ON l.topic_id = t.id
                 WHERE t.subject_id = s.id
-                  AND NOT EXISTS (
-                      SELECT 1 FROM lesson_reviews lr
-                      WHERE lr.user_id = student.id AND lr.lesson_id = l.id
-                  )
             )
             AND NOT EXISTS (
                 SELECT 1
@@ -40,7 +45,8 @@ class StudyNestLearningApi extends StudyNestApiBase
                       )
                       OR NOT EXISTS (
                           SELECT 1 FROM quiz_attempts qa
-                          WHERE qa.user_id = student.id AND qa.quiz_id = q.id AND qa.percentage >= 70
+                          WHERE qa.user_id = student.id AND qa.quiz_id = q.id
+                            AND qa.percentage >= COALESCE(certificate_settings.minimum_quiz_score, 70)
                       )
                   )
             )
@@ -255,6 +261,21 @@ class StudyNestLearningApi extends StudyNestApiBase
             $this->respond([]);
         }
         $this->issue_completed_subject_certificates($user_id);
+        foreach ($this->all(
+            'SELECT id, subject_name, teacher_name
+             FROM certificates WHERE user_id = ? ORDER BY id',
+            [$user_id]
+        ) as $certificate) {
+            $this->create_user_notification(
+                $user_id,
+                'certificate:' . (int) $certificate['id'],
+                'certificate_earned',
+                'Your certificate is ready!',
+                'Congratulations! You completed ' . $certificate['subject_name']
+                    . ' with ' . $certificate['teacher_name'] . '. Your downloadable certificate is now available in your profile.',
+                '#/certificates'
+            );
+        }
         $this->respond($this->all(
             'SELECT id, subject_name, teacher_name, certificate_code, issued_at
              FROM certificates WHERE user_id = ? ORDER BY issued_at DESC, id DESC',
@@ -313,12 +334,16 @@ class StudyNestLearningApi extends StudyNestApiBase
                         'id', s.id,
                         'name', s.name,
                         'description', s.description,
+                        'certificate_enabled', COALESCE(certificate_settings.enabled, 0),
+                        'required_completion_percent', COALESCE(certificate_settings.required_completion_percent, 100),
+                        'minimum_quiz_score', COALESCE(certificate_settings.minimum_quiz_score, 70),
                         'lessons', COALESCE(lc.lessons, 0),
                         'quizzes', COALESCE(qc.quizzes, 0),
                         'progress', CASE WHEN COALESCE(lc.lessons, 0) = 0 THEN 0
                             ELSE ROUND(100 * COALESCE(lc.reviewed, 0) / lc.lessons) END
                     )), JSON_ARRAY())
                     FROM subjects s
+                    LEFT JOIN subject_certificate_settings certificate_settings ON certificate_settings.subject_id = s.id
                     LEFT JOIN (
                         SELECT t.subject_id, COUNT(l.id) AS lessons, COUNT(lr.lesson_id) AS reviewed
                         FROM topics t
@@ -429,6 +454,11 @@ class StudyNestLearningApi extends StudyNestApiBase
                         WHERE user_id = ?
                     ) AS favorites,
                     (
+                        SELECT COALESCE(JSON_ARRAYAGG(subject_id), JSON_ARRAY())
+                        FROM favorite_subjects
+                        WHERE user_id = ?
+                    ) AS favorite_subjects,
+                    (
                         SELECT COALESCE(JSON_ARRAYAGG(lesson_id), JSON_ARRAY())
                         FROM lesson_reviews
                         WHERE user_id = ?
@@ -510,7 +540,7 @@ class StudyNestLearningApi extends StudyNestApiBase
                             WHERE pqa.user_id = ?
                         ) attempts
                     ) AS attempts
-                SQL, array_fill(0, 10, $user_id));
+                SQL, array_fill(0, 11, $user_id));
         }
         $payload = [
             'csrf_token' => $this->csrf_token(),
@@ -525,6 +555,7 @@ class StudyNestLearningApi extends StudyNestApiBase
             'sets' => [],
             'schedules' => [],
             'favorites' => [],
+            'favoriteSubjects' => [],
             'attempts' => [],
             'reviewedLessons' => [],
             'activities' => [],
@@ -548,6 +579,9 @@ class StudyNestLearningApi extends StudyNestApiBase
         foreach ($payload['subjects'] as &$subject) {
             $subject['lessons'] = (int) $subject['lessons'];
             $subject['quizzes'] = (int) $subject['quizzes'];
+            $subject['certificate_enabled'] = (bool) $subject['certificate_enabled'];
+            $subject['required_completion_percent'] = (int) $subject['required_completion_percent'];
+            $subject['minimum_quiz_score'] = (int) $subject['minimum_quiz_score'];
             $subject['short'] = strtoupper(substr(preg_replace('/[^a-z]/i', '', $subject['name']), 0, 2));
             $subject['progress'] = (int) $subject['progress'];
             $subject['id'] = (int) $subject['id'];
@@ -585,6 +619,10 @@ class StudyNestLearningApi extends StudyNestApiBase
                 $payload[$payload_key] = json_decode($user_data[$key], true, 512, JSON_THROW_ON_ERROR);
             }
             $payload['favorites'] = array_map('intval', $payload['favorites']);
+            $payload['favoriteSubjects'] = array_map(
+                'intval',
+                json_decode($user_data['favorite_subjects'], true, 512, JSON_THROW_ON_ERROR)
+            );
             $payload['reviewedLessons'] = array_map('intval', $payload['reviewedLessons']);
             $payload['studyTimeSeconds'] = (int) $user_data['study_time_seconds'];
             usort($payload['sets'], static function ($a, $b) {
@@ -1170,6 +1208,36 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->verify_csrf();
         $this->execute('DELETE FROM favorite_lessons WHERE user_id = ? AND lesson_id = ?', [$this->user_id(), (int) $lesson_id]);
         $this->respond(['ok' => true]);
+    }
+
+    public function subject_favorites()
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $data = $this->body();
+        $subject_id = (int) ($data['subject_id'] ?? 0);
+        $subject = $this->one('SELECT id, name FROM subjects WHERE id = ?', [$subject_id]);
+        if (!$subject) {
+            $this->fail('Subject not found.', 404);
+        }
+        $exists = $this->one(
+            'SELECT id FROM favorite_subjects WHERE user_id = ? AND subject_id = ?',
+            [$user_id, $subject_id]
+        );
+        if ($exists) {
+            $this->execute(
+                'DELETE FROM favorite_subjects WHERE user_id = ? AND subject_id = ?',
+                [$user_id, $subject_id]
+            );
+            $this->activity($user_id, 'favorite_removed', $subject['name'], 'Subject');
+            $this->respond(['saved' => false]);
+        }
+        $this->execute(
+            'INSERT INTO favorite_subjects (user_id, subject_id) VALUES (?, ?)',
+            [$user_id, $subject_id]
+        );
+        $this->activity($user_id, 'favorite_added', $subject['name'], 'Subject');
+        $this->respond(['saved' => true], 201);
     }
 
     private function private_subject_owned($subject_id, $user_id)

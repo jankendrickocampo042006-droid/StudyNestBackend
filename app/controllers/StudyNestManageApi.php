@@ -70,6 +70,10 @@ class StudyNestManageApi extends StudyNestApiBase
                        WHERE f.user_id = u.id AND t.subject_id = ?
                    )
                    OR EXISTS (
+                       SELECT 1 FROM favorite_subjects fs
+                       WHERE fs.user_id = u.id AND fs.subject_id = ?
+                   )
+                   OR EXISTS (
                        SELECT 1
                        FROM lesson_reviews lr
                        JOIN lessons l ON l.id = lr.lesson_id
@@ -84,7 +88,7 @@ class StudyNestManageApi extends StudyNestApiBase
                        WHERE qa.user_id = u.id AND t.subject_id = ?
                    )
                )",
-            [(int) $subject_id, (int) $subject_id, (int) $subject_id]
+            [(int) $subject_id, (int) $subject_id, (int) $subject_id, (int) $subject_id]
         );
         $teacher = $this->current_user();
         $created_notifications = 0;
@@ -136,8 +140,13 @@ class StudyNestManageApi extends StudyNestApiBase
                 $scope_values
             ),
             'subjects' => $this->all(
-                'SELECT id, name, description FROM subjects' .
-                ($teacher_scope ? ' WHERE owner_id = ?' : '') . ' ORDER BY name',
+                'SELECT s.id, s.name, s.description,
+                        COALESCE(certificate_settings.enabled, 0) AS certificate_enabled,
+                        COALESCE(certificate_settings.required_completion_percent, 100) AS required_completion_percent,
+                        COALESCE(certificate_settings.minimum_quiz_score, 70) AS minimum_quiz_score
+                 FROM subjects s
+                 LEFT JOIN subject_certificate_settings certificate_settings ON certificate_settings.subject_id = s.id' .
+                ($teacher_scope ? ' WHERE s.owner_id = ?' : '') . ' ORDER BY s.name',
                 $scope_values
             ),
             'lessons' => $this->all(
@@ -384,6 +393,54 @@ class StudyNestManageApi extends StudyNestApiBase
         return [$config, $values];
     }
 
+    private function save_subject_certificate_settings($subject_id, array $data)
+    {
+        $settings = $this->one(
+            'SELECT enabled, required_completion_percent, minimum_quiz_score
+             FROM subject_certificate_settings WHERE subject_id = ?',
+            [(int) $subject_id]
+        ) ?: [
+            'enabled' => 0,
+            'required_completion_percent' => 100,
+            'minimum_quiz_score' => 70,
+        ];
+        if (array_key_exists('certificate_enabled', $data)) {
+            $enabled = $data['certificate_enabled'];
+            if (!in_array($enabled, [0, 1, '0', '1', false, true], true)) {
+                $this->fail('Choose whether certificates are enabled for this subject.');
+            }
+            $settings['enabled'] = (int) $enabled;
+        }
+        foreach ([
+            'required_completion_percent' => [1, 100, 'Lesson completion percentage'],
+            'minimum_quiz_score' => [0, 100, 'Minimum quiz score'],
+        ] as $field => [$minimum, $maximum, $label]) {
+            if (!array_key_exists($field, $data)) {
+                continue;
+            }
+            $value = filter_var($data[$field], FILTER_VALIDATE_INT);
+            if ($value === false || $value < $minimum || $value > $maximum) {
+                $this->fail($label . ' must be between ' . $minimum . ' and ' . $maximum . '.');
+            }
+            $settings[$field] = $value;
+        }
+        $this->execute(
+            'INSERT INTO subject_certificate_settings
+                (subject_id, enabled, required_completion_percent, minimum_quiz_score)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                enabled = VALUES(enabled),
+                required_completion_percent = VALUES(required_completion_percent),
+                minimum_quiz_score = VALUES(minimum_quiz_score)',
+            [
+                (int) $subject_id,
+                (int) $settings['enabled'],
+                (int) $settings['required_completion_percent'],
+                (int) $settings['minimum_quiz_score'],
+            ]
+        );
+    }
+
     public function manage_subjects()
     {
         $this->catalog('subjects');
@@ -432,8 +489,13 @@ class StudyNestManageApi extends StudyNestApiBase
             }
             if ($kind === 'subjects') {
                 $this->respond($this->all(
-                    'SELECT id, name, description FROM subjects' .
-                    ($teacher_scope ? ' WHERE owner_id = ?' : '') . ' ORDER BY id DESC',
+                    'SELECT s.id, s.name, s.description,
+                            COALESCE(certificate_settings.enabled, 0) AS certificate_enabled,
+                            COALESCE(certificate_settings.required_completion_percent, 100) AS required_completion_percent,
+                            COALESCE(certificate_settings.minimum_quiz_score, 70) AS minimum_quiz_score
+                     FROM subjects s
+                     LEFT JOIN subject_certificate_settings certificate_settings ON certificate_settings.subject_id = s.id' .
+                    ($teacher_scope ? ' WHERE s.owner_id = ?' : '') . ' ORDER BY s.id DESC',
                     $teacher_scope ? [$user_id] : []
                 ));
             }
@@ -466,6 +528,9 @@ class StudyNestManageApi extends StudyNestApiBase
             implode(', ', array_fill(0, count($columns), '?')) . ')',
             array_values($values)
         );
+        if ($kind === 'subjects') {
+            $this->save_subject_certificate_settings($id, $data);
+        }
         $this->activity($user_id, 'content_created', $values['name'] ?? $values['title'], ucfirst(rtrim($kind, 's')));
         if ($kind === 'topics') {
             $subject = $this->one('SELECT name FROM subjects WHERE id = ?', [(int) $values['subject_id']]);
@@ -533,6 +598,9 @@ class StudyNestManageApi extends StudyNestApiBase
             'UPDATE ' . $config['table'] . ' SET ' . $assignments . ' WHERE id = ?',
             array_merge(array_values($values), [$id])
         );
+        if ($kind === 'subjects') {
+            $this->save_subject_certificate_settings($id, $data);
+        }
         if ($kind === 'lessons' && ($pdf || $remove_pdf)) {
             $this->delete_private_lesson_pdf($existing['pdf_storage_name']);
         }
