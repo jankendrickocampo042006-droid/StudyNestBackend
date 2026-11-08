@@ -275,13 +275,6 @@ CREATE TABLE IF NOT EXISTS private_quiz_attempts (
     CONSTRAINT private_quiz_attempts_quiz_fk FOREIGN KEY (quiz_id) REFERENCES private_quizzes(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS private_quiz_ai_usage (
-    user_id INT UNSIGNED NOT NULL PRIMARY KEY,
-    window_started_at DATETIME NOT NULL,
-    generation_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
-    CONSTRAINT private_quiz_ai_usage_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
 CREATE TABLE IF NOT EXISTS certificates (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
