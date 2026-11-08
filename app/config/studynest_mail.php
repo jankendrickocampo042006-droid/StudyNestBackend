@@ -8,3 +8,4 @@ $config['studynest_smtp_username'] = getenv('SMTP_USERNAME') ?: '';
 $config['studynest_smtp_password'] = getenv('SMTP_PASSWORD') ?: '';
 $config['studynest_mail_from'] = getenv('SMTP_FROM_EMAIL') ?: (getenv('SMTP_USERNAME') ?: '');
 $config['studynest_mail_from_name'] = getenv('SMTP_FROM_NAME') ?: 'StudyNest';
+$config['studynest_app_url'] = rtrim(getenv('STUDYNEST_APP_URL') ?: 'https://studynest-r85g.onrender.com', '/');

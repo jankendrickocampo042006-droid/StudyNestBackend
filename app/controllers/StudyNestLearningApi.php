@@ -52,7 +52,7 @@ class StudyNestLearningApi extends StudyNestApiBase
 
         foreach ($eligible_subjects as $subject) {
             $code = 'SN-' . date('Y') . '-' . strtoupper(bin2hex(random_bytes(5)));
-            $this->execute(
+            $created = $this->execute(
                 'INSERT IGNORE INTO certificates
                     (user_id, subject_id, student_name, subject_name, teacher_name, certificate_code)
                  VALUES (?, ?, ?, ?, ?, ?)',
@@ -65,7 +65,104 @@ class StudyNestLearningApi extends StudyNestApiBase
                     $code,
                 ]
             );
+            if ($created) {
+                $certificate = $this->one(
+                    'SELECT id, subject_name, teacher_name FROM certificates WHERE user_id = ? AND subject_id = ?',
+                    [(int) $user_id, (int) $subject['subject_id']]
+                );
+                if ($certificate) {
+                    $this->create_user_notification(
+                        (int) $user_id,
+                        'certificate:' . (int) $certificate['id'],
+                        'certificate_earned',
+                        'Your certificate is ready!',
+                        'Congratulations! You completed ' . $certificate['subject_name']
+                            . ' with ' . $certificate['teacher_name'] . '. Your downloadable certificate is now available in your profile.',
+                        '#/certificates',
+                        'certificate'
+                    );
+                }
+            }
         }
+    }
+
+    public function notifications()
+    {
+        $user_id = $this->user_id();
+        $this->schedule_notification_email_delivery();
+        $this->respond($this->all(
+            'SELECT id, type, title, message, link, read_at, created_at
+             FROM studynest_notifications
+             WHERE user_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 100',
+            [$user_id]
+        ));
+    }
+
+    public function notification_read($id)
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $updated = $this->execute(
+            'UPDATE studynest_notifications SET read_at = COALESCE(read_at, NOW()) WHERE id = ? AND user_id = ?',
+            [(int) $id, $user_id]
+        );
+        if (!$updated && !$this->one(
+            'SELECT id FROM studynest_notifications WHERE id = ? AND user_id = ? AND read_at IS NOT NULL',
+            [(int) $id, $user_id]
+        )) {
+            $this->fail('Notification not found.', 404);
+        }
+        $this->respond(['ok' => true]);
+    }
+
+    public function notifications_read_all()
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $updated = $this->execute(
+            'UPDATE studynest_notifications SET read_at = NOW() WHERE user_id = ? AND read_at IS NULL',
+            [$user_id]
+        );
+        $this->respond(['ok' => true, 'updated' => $updated]);
+    }
+
+    public function notification_preferences()
+    {
+        $user_id = $this->user_id();
+        if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+            $preferences = $this->one(
+                'SELECT email_certificates, email_content_updates
+                 FROM studynest_notification_preferences WHERE user_id = ?',
+                [$user_id]
+            );
+            $this->respond([
+                'email_certificates' => $preferences ? (bool) $preferences['email_certificates'] : true,
+                'email_content_updates' => $preferences ? (bool) $preferences['email_content_updates'] : true,
+            ]);
+        }
+
+        $this->verify_csrf();
+        $data = $this->body();
+        foreach (['email_certificates', 'email_content_updates'] as $key) {
+            if (!array_key_exists($key, $data) || !is_bool($data[$key])) {
+                $this->fail('Choose whether to receive each type of email notification.');
+            }
+        }
+        $this->execute(
+            'INSERT INTO studynest_notification_preferences
+                (user_id, email_certificates, email_content_updates)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                email_certificates = VALUES(email_certificates),
+                email_content_updates = VALUES(email_content_updates)',
+            [$user_id, (int) $data['email_certificates'], (int) $data['email_content_updates']]
+        );
+        $this->respond([
+            'email_certificates' => $data['email_certificates'],
+            'email_content_updates' => $data['email_content_updates'],
+        ]);
     }
 
     private function certificate_pdf_string($value)

@@ -3,6 +3,8 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 class StudyNestApiBase extends Controller
 {
+    private $notification_email_delivery_scheduled = false;
+
     public function before_action()
     {
         $this->security_headers->apply_api();
@@ -100,6 +102,172 @@ class StudyNestApiBase extends Controller
             throw new RuntimeException('The database did not return the new record ID.');
         }
         return $id;
+    }
+
+    protected function create_user_notification($user_id, $event_key, $type, $title, $message, $link, $email_category = null)
+    {
+        $created = $this->execute(
+            'INSERT IGNORE INTO studynest_notifications
+                (user_id, event_key, type, title, message, link)
+             VALUES (?, ?, ?, ?, ?, ?)',
+            [
+                (int) $user_id,
+                substr((string) $event_key, 0, 190),
+                substr((string) $type, 0, 40),
+                substr((string) $title, 0, 180),
+                substr((string) $message, 0, 500),
+                $link === null ? null : substr((string) $link, 0, 255),
+            ]
+        );
+        if (!$created || !$email_category) {
+            return (bool) $created;
+        }
+
+        $preference_column = [
+            'certificate' => 'email_certificates',
+            'content_update' => 'email_content_updates',
+        ][$email_category] ?? null;
+        if (!$preference_column) {
+            throw new InvalidArgumentException('Unknown StudyNest notification email category.');
+        }
+        $preference = $this->one(
+            'SELECT ' . $preference_column . ' AS enabled FROM studynest_notification_preferences WHERE user_id = ?',
+            [(int) $user_id]
+        );
+        if ($preference && (int) $preference['enabled'] !== 1) {
+            return true;
+        }
+        $notification = $this->one(
+            'SELECT id FROM studynest_notifications WHERE user_id = ? AND event_key = ?',
+            [(int) $user_id, substr((string) $event_key, 0, 190)]
+        );
+        if (!$notification) {
+            throw new RuntimeException('The StudyNest notification could not be reloaded after creation.');
+        }
+        $this->execute(
+            'INSERT IGNORE INTO studynest_notification_email_outbox (notification_id, category) VALUES (?, ?)',
+            [(int) $notification['id'], $email_category]
+        );
+        $this->schedule_notification_email_delivery();
+        return true;
+    }
+
+    protected function schedule_notification_email_delivery()
+    {
+        if ($this->notification_email_delivery_scheduled) {
+            return;
+        }
+        $this->notification_email_delivery_scheduled = true;
+        register_shutdown_function(function () {
+            ignore_user_abort(true);
+            set_time_limit(35);
+            if (function_exists('fastcgi_finish_request')) {
+                fastcgi_finish_request();
+            } else {
+                while (ob_get_level() > 0) {
+                    if (!ob_end_flush()) {
+                        break;
+                    }
+                }
+                flush();
+            }
+            $this->process_notification_email_outbox();
+        });
+    }
+
+    protected function process_notification_email_outbox($limit = 10)
+    {
+        $jobs = $this->all(
+            "SELECT o.id, o.notification_id, o.category, o.status, o.attempts,
+                    n.title, n.message, n.link, u.email,
+                    COALESCE(p.email_certificates, 1) AS email_certificates,
+                    COALESCE(p.email_content_updates, 1) AS email_content_updates
+             FROM studynest_notification_email_outbox o
+             JOIN studynest_notifications n ON n.id = o.notification_id
+             JOIN users u ON u.id = n.user_id
+             LEFT JOIN studynest_notification_preferences p ON p.user_id = n.user_id
+             WHERE (o.status = 'pending' AND o.attempts < 5 AND o.available_at <= NOW())
+                OR (o.status = 'sending' AND o.updated_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE))
+             ORDER BY o.id LIMIT " . max(1, min(10, (int) $limit))
+        );
+        foreach ($jobs as $job) {
+            if ($job['status'] === 'sending' && (int) $job['attempts'] >= 5) {
+                $this->execute(
+                    "UPDATE studynest_notification_email_outbox
+                     SET status = 'failed', last_error = 'Delivery was interrupted at the retry limit.', updated_at = NOW()
+                     WHERE id = ? AND status = 'sending' AND attempts >= 5",
+                    [(int) $job['id']]
+                );
+                continue;
+            }
+            if ($job['status'] === 'pending') {
+                $claimed = $this->execute(
+                    "UPDATE studynest_notification_email_outbox
+                     SET status = 'sending', attempts = attempts + 1, updated_at = NOW()
+                     WHERE id = ? AND status = 'pending' AND available_at <= NOW()",
+                    [(int) $job['id']]
+                );
+            } else {
+                $claimed = $this->execute(
+                    "UPDATE studynest_notification_email_outbox
+                     SET attempts = attempts + 1, updated_at = NOW()
+                     WHERE id = ? AND status = 'sending' AND updated_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)",
+                    [(int) $job['id']]
+                );
+            }
+            if (!$claimed) {
+                continue;
+            }
+
+            $preference_enabled = $job['category'] === 'certificate'
+                ? (int) $job['email_certificates'] === 1
+                : ($job['category'] === 'content_update' && (int) $job['email_content_updates'] === 1);
+            if (!$preference_enabled) {
+                $this->execute(
+                    "UPDATE studynest_notification_email_outbox
+                     SET status = 'failed', last_error = 'Email notifications are disabled by the user.', updated_at = NOW()
+                     WHERE id = ? AND status = 'sending'",
+                    [(int) $job['id']]
+                );
+                continue;
+            }
+
+            try {
+                $subject = $job['category'] === 'certificate'
+                    ? 'Your StudyNest certificate is ready'
+                    : 'A new learning update is available on StudyNest';
+                $this->call->library('studynest_mailer')->send_notification(
+                    $job['email'],
+                    $subject,
+                    $job['title'],
+                    $job['message'],
+                    $job['link'] ?: '#/notifications'
+                );
+                $this->execute(
+                    "UPDATE studynest_notification_email_outbox
+                     SET status = 'sent', sent_at = NOW(), last_error = NULL, updated_at = NOW()
+                     WHERE id = ? AND status = 'sending'",
+                    [(int) $job['id']]
+                );
+            } catch (Throwable $error) {
+                $attempts = (int) $job['attempts'] + 1;
+                $status = $attempts >= 5 ? 'failed' : 'pending';
+                $delay_minutes = min(60, 2 ** $attempts);
+                $available_at = date('Y-m-d H:i:s', time() + ($delay_minutes * 60));
+                $this->execute(
+                    'UPDATE studynest_notification_email_outbox
+                     SET status = ?, available_at = ?, last_error = ?, updated_at = NOW()
+                     WHERE id = ? AND status = \'sending\'',
+                    [$status, $available_at, substr($error->getMessage(), 0, 500), (int) $job['id']]
+                );
+                error_log(sprintf(
+                    'StudyNest notification email job %d failed on attempt %d: %s',
+                    (int) $job['id'],
+                    $attempts,
+                    $error->getMessage()
+                ));
+            }
+        }
     }
 
     protected function send_email_otp($user_id, $email)

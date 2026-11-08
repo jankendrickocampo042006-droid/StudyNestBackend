@@ -55,6 +55,53 @@ class StudyNestManageApi extends StudyNestApiBase
         return $item;
     }
 
+    private function notify_subject_audience($subject_id, $event_key, $type, $title, $message)
+    {
+        $recipients = $this->all(
+            "SELECT DISTINCT u.id
+             FROM users u
+             WHERE u.role = 'user' AND u.is_active = 1 AND u.email_verified_at IS NOT NULL
+               AND (
+                   EXISTS (
+                       SELECT 1
+                       FROM favorite_lessons f
+                       JOIN lessons l ON l.id = f.lesson_id
+                       JOIN topics t ON t.id = l.topic_id
+                       WHERE f.user_id = u.id AND t.subject_id = ?
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                       FROM lesson_reviews lr
+                       JOIN lessons l ON l.id = lr.lesson_id
+                       JOIN topics t ON t.id = l.topic_id
+                       WHERE lr.user_id = u.id AND t.subject_id = ?
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                       FROM quiz_attempts qa
+                       JOIN quizzes q ON q.id = qa.quiz_id
+                       JOIN topics t ON t.id = q.topic_id
+                       WHERE qa.user_id = u.id AND t.subject_id = ?
+                   )
+               )",
+            [(int) $subject_id, (int) $subject_id, (int) $subject_id]
+        );
+        $teacher = $this->current_user();
+        $created_notifications = 0;
+        foreach ($recipients as $recipient) {
+            $created_notifications += (int) $this->create_user_notification(
+                (int) $recipient['id'],
+                $event_key,
+                $type,
+                $title,
+                $message . ($teacher ? ' Shared by ' . $teacher['full_name'] . '.' : ''),
+                '#/subject/' . (int) $subject_id,
+                'content_update'
+            );
+        }
+        return $created_notifications;
+    }
+
     public function manage()
     {
         $manager = $this->content_manager();
@@ -420,6 +467,32 @@ class StudyNestManageApi extends StudyNestApiBase
             array_values($values)
         );
         $this->activity($user_id, 'content_created', $values['name'] ?? $values['title'], ucfirst(rtrim($kind, 's')));
+        if ($kind === 'topics') {
+            $subject = $this->one('SELECT name FROM subjects WHERE id = ?', [(int) $values['subject_id']]);
+            if ($subject) {
+                $this->notify_subject_audience(
+                    (int) $values['subject_id'],
+                    'topic:' . $id,
+                    'new_topic',
+                    'A new topic was added',
+                    'A new topic, ' . $values['title'] . ', is available in ' . $subject['name'] . '.'
+                );
+            }
+        } elseif ($kind === 'lessons') {
+            $subject = $this->one(
+                'SELECT s.id, s.name FROM topics t JOIN subjects s ON s.id = t.subject_id WHERE t.id = ?',
+                [(int) $values['topic_id']]
+            );
+            if ($subject) {
+                $this->notify_subject_audience(
+                    (int) $subject['id'],
+                    'lesson:' . $id,
+                    'new_lesson',
+                    'A new lesson was added',
+                    'A new lesson, ' . $values['title'] . ', is available for ' . $subject['name'] . '.'
+                );
+            }
+        }
         unset($values['pdf_storage_name'], $values['pdf_data']);
         $this->respond(array_merge(['id' => $id], $values), 201);
     }
