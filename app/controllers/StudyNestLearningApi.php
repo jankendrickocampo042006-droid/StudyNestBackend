@@ -772,6 +772,73 @@ class StudyNestLearningApi extends StudyNestApiBase
         exit;
     }
 
+    public function lesson_pdf_text($id)
+    {
+        $this->user_id();
+        $lesson = $this->one(
+            'SELECT l.id, l.title, l.pdf_storage_name, l.pdf_original_name, l.pdf_data, s.owner_id
+             FROM lessons l JOIN topics t ON t.id = l.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE l.id = ?',
+            [(int) $id]
+        );
+        if (!$lesson || (!$lesson['pdf_storage_name'] && ($lesson['pdf_data'] === null || $lesson['pdf_data'] === ''))) {
+            $this->fail('This lesson does not have an attached PDF.', 404);
+        }
+        $this->assert_teacher_subject_owner($lesson['owner_id']);
+
+        if ($lesson['pdf_data'] !== null && $lesson['pdf_data'] !== '') {
+            $pdf = $lesson['pdf_data'];
+        } else {
+            $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'lesson-pdfs';
+            $path = $directory . DIRECTORY_SEPARATOR . basename($lesson['pdf_storage_name']);
+            if (!is_file($path) || (new finfo(FILEINFO_MIME_TYPE))->file($path) !== 'application/pdf') {
+                $this->fail('The lesson PDF is unavailable. Upload it again to restore access.', 404);
+            }
+            $size = filesize($path);
+            if ($size === false || $size > 20 * 1024 * 1024) {
+                $this->fail('This PDF is too large to read aloud.', 413);
+            }
+            $pdf = file_get_contents($path);
+            if ($pdf === false) {
+                error_log('StudyNest could not read lesson PDF text for lesson ' . (int) $lesson['id'] . '.');
+                $this->fail('Could not read the attached PDF. Please try again later.', 503);
+            }
+        }
+
+        if (substr($pdf, 0, 5) !== '%PDF-') {
+            $this->fail('The lesson PDF is unavailable.', 404);
+        }
+        if (strlen($pdf) > 20 * 1024 * 1024) {
+            $this->fail('This PDF is too large to read aloud.', 413);
+        }
+
+        try {
+            $document = (new \Smalot\PdfParser\Parser())->parseContent($pdf);
+            $text = trim($document->getText());
+        } catch (\Exception $error) {
+            error_log(sprintf(
+                'StudyNest could not extract text from lesson PDF %d: %s',
+                (int) $lesson['id'],
+                $error->getMessage()
+            ));
+            $this->fail('Could not extract readable text from this PDF. It may be scanned, image-only, or password-protected.', 422);
+        }
+
+        if ($text === '') {
+            $this->fail('This PDF has no selectable text to read aloud. Scanned or image-only PDFs are not supported.', 422);
+        }
+
+        $truncated = mb_strlen($text, 'UTF-8') > 100000;
+        if ($truncated) {
+            $text = mb_substr($text, 0, 100000, 'UTF-8');
+        }
+        $this->respond([
+            'title' => $lesson['title'],
+            'text' => $text,
+            'truncated' => $truncated,
+        ]);
+    }
+
     public function profile()
     {
         $user_id = $this->user_id();
