@@ -79,6 +79,7 @@ $router->put('/api/my-library/{kind}/{id}', 'StudyNestLearningApi::private_libra
 $router->delete('/api/my-library/{kind}/{id}', 'StudyNestLearningApi::private_library_resource');
 $router->get('/api/my-library/lessons/{id}/pdf', 'StudyNestLearningApi::private_lesson_pdf');
 $router->get('/api/my-library/quizzes/{id}', 'StudyNestLearningApi::private_quiz');
+$router->post('/api/my-library/quizzes/{id}/start', 'StudyNestLearningApi::start_private_quiz');
 $router->post('/api/my-library/quizzes/{id}/attempts', 'StudyNestLearningApi::submit_private_quiz');
 $router->get('/api/schedules', 'StudyNestLearningApi::schedules');
 $router->post('/api/schedules', 'StudyNestLearningApi::schedules');
@@ -91,6 +92,7 @@ $router->post('/api/lessons/{id}/review', 'StudyNestLearningApi::review_lesson')
 $router->post('/api/lessons/{id}/viewed', 'StudyNestLearningApi::lesson_pdf_viewed');
 $router->get('/api/lessons/{id}/pdf', 'StudyNestLearningApi::lesson_pdf');
 $router->get('/api/quizzes/{id}', 'StudyNestLearningApi::quiz');
+$router->post('/api/quizzes/{id}/start', 'StudyNestLearningApi::start_quiz');
 $router->post('/api/quizzes/{id}/attempts', 'StudyNestLearningApi::submit_quiz');
 $router->get('/api/manage', 'StudyNestManageApi::manage');
 $router->get('/api/manage/teachers', 'StudyNestManageApi::manage_teachers');

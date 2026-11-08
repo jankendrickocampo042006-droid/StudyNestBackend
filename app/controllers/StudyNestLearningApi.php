@@ -1522,9 +1522,11 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $quiz_id = (int) $id;
-        if (!$this->private_quiz_owned($quiz_id, $user_id)) {
+        $quiz = $this->private_quiz_owned($quiz_id, $user_id);
+        if (!$quiz) {
             $this->fail('Private quiz not found.', 404);
         }
+        $duration_seconds = $this->finish_quiz_timer($data['timer_token'] ?? '', 'private', $quiz_id, $user_id);
         $questions = $this->all(
             'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d, correct_option, explanation
              FROM private_quiz_questions WHERE quiz_id = ? ORDER BY id',
@@ -1569,7 +1571,7 @@ class StudyNestLearningApi extends StudyNestApiBase
         }
         $total = count($questions);
         $percentage = round(100 * $score / $total, 2);
-        $time_taken = preg_replace('/[^0-9A-Za-z ]/', '', (string) ($data['time_taken'] ?? ''));
+        $time_taken = $duration_seconds . 's';
         $this->execute(
             'INSERT INTO private_quiz_attempts (user_id, quiz_id, score, total_questions, percentage, time_taken) VALUES (?, ?, ?, ?, ?, ?)',
             [$user_id, $quiz_id, $score, $total, $percentage, substr($time_taken, 0, 20)]
@@ -1580,6 +1582,25 @@ class StudyNestLearningApi extends StudyNestApiBase
             'percentage' => $percentage,
             'review' => $review,
         ]);
+    }
+
+    public function start_private_quiz($id)
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $quiz_id = (int) $id;
+        $quiz = $this->private_quiz_owned($quiz_id, $user_id);
+        if (!$quiz) {
+            $this->fail('Private quiz not found.', 404);
+        }
+        $question_count = (int) $this->one(
+            'SELECT COUNT(*) AS question_count FROM private_quiz_questions WHERE quiz_id = ?',
+            [$quiz_id]
+        )['question_count'];
+        if ($question_count === 0) {
+            $this->fail('This quiz does not have any questions yet.', 422);
+        }
+        $this->create_quiz_timer($quiz_id, $user_id, (int) $quiz['duration_minutes'], 'private');
     }
 
     public function quiz($id)
@@ -1626,6 +1647,7 @@ class StudyNestLearningApi extends StudyNestApiBase
             $this->fail('Quiz not found.', 404);
         }
         $this->assert_teacher_subject_owner($quiz['owner_id']);
+        $duration_seconds = $this->finish_quiz_timer($data['timer_token'] ?? '', 'public', $quiz_id, $user_id);
         $questions = $this->all(
             'SELECT id, question_text AS question, type, option_a, option_b, option_c, option_d, correct_option, explanation
              FROM quiz_questions WHERE quiz_id = ? ORDER BY id',
@@ -1670,7 +1692,7 @@ class StudyNestLearningApi extends StudyNestApiBase
         $this->execute(
             'INSERT INTO quiz_attempts (user_id, quiz_id, score, total_questions, percentage, time_taken, completed_at)
              VALUES (?, ?, ?, ?, ?, ?, NOW())',
-            [$user_id, $quiz_id, $score, count($questions), $percentage, substr((string) ($data['time_taken'] ?? '00:00'), 0, 20)]
+            [$user_id, $quiz_id, $score, count($questions), $percentage, $duration_seconds . 's']
         );
         $this->issue_completed_subject_certificates($user_id);
         $quiz = $this->one(
@@ -1678,13 +1700,12 @@ class StudyNestLearningApi extends StudyNestApiBase
              JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
             [$quiz_id]
         );
-        $duration = min(7200, max(0, (int) ($data['duration_seconds'] ?? 0)));
         $this->activity(
             $user_id,
             'quiz_completed',
             $quiz['title'],
             $quiz['subject'] . ' · ' . $percentage . '%',
-            $duration
+            $duration_seconds
         );
         $this->respond([
             'score' => $score,
@@ -1692,5 +1713,83 @@ class StudyNestLearningApi extends StudyNestApiBase
             'percentage' => $percentage,
             'review' => $review,
         ], 201);
+    }
+
+    public function start_quiz($id)
+    {
+        $user_id = $this->user_id();
+        $this->verify_csrf();
+        $quiz_id = (int) $id;
+        $quiz = $this->one(
+            'SELECT q.id, q.duration_minutes, s.owner_id
+             FROM quizzes q JOIN topics t ON t.id = q.topic_id
+             JOIN subjects s ON s.id = t.subject_id WHERE q.id = ?',
+            [$quiz_id]
+        );
+        if (!$quiz) {
+            $this->fail('Quiz not found.', 404);
+        }
+        $this->assert_teacher_subject_owner($quiz['owner_id']);
+        $question_count = (int) $this->one(
+            'SELECT COUNT(*) AS question_count FROM quiz_questions WHERE quiz_id = ?',
+            [$quiz_id]
+        )['question_count'];
+        if ($question_count === 0) {
+            $this->fail('This quiz does not have any questions yet.', 422);
+        }
+        $this->create_quiz_timer($quiz_id, $user_id, (int) $quiz['duration_minutes'], 'public');
+    }
+
+    private function create_quiz_timer($quiz_id, $user_id, $duration_minutes, $kind)
+    {
+        $duration_seconds = min(36000, max(60, (int) $duration_minutes * 60));
+        $started_at = microtime(true);
+        $token = bin2hex(random_bytes(24));
+        $timers = $this->session->userdata('studynest_quiz_timers');
+        $timers = is_array($timers) ? $timers : [];
+        foreach ($timers as $existing_token => $timer) {
+            if (!is_array($timer) || ($started_at - (float) ($timer['started_at'] ?? 0)) > 36000) {
+                unset($timers[$existing_token]);
+            }
+        }
+        while (count($timers) >= 10) {
+            array_shift($timers);
+        }
+        $timers[$token] = [
+            'user_id' => (int) $user_id,
+            'quiz_id' => (int) $quiz_id,
+            'kind' => $kind,
+            'started_at' => $started_at,
+            'duration_seconds' => $duration_seconds,
+        ];
+        $this->session->set_userdata('studynest_quiz_timers', $timers);
+        $this->respond([
+            'timer_token' => $token,
+            'duration_seconds' => $duration_seconds,
+            'server_time_ms' => (int) round($started_at * 1000),
+            'expires_at_ms' => (int) round(($started_at + $duration_seconds) * 1000),
+        ]);
+    }
+
+    private function finish_quiz_timer($token, $kind, $quiz_id, $user_id)
+    {
+        $token = trim((string) $token);
+        $timers = $this->session->userdata('studynest_quiz_timers');
+        if ($token === '' || !is_array($timers) || !isset($timers[$token])) {
+            $this->fail('This quiz timer has expired. Please start the quiz again.', 409);
+        }
+        $timer = $timers[$token];
+        if (
+            !is_array($timer)
+            || (int) ($timer['user_id'] ?? 0) !== (int) $user_id
+            || (int) ($timer['quiz_id'] ?? 0) !== (int) $quiz_id
+            || ($timer['kind'] ?? '') !== $kind
+        ) {
+            $this->fail('This quiz timer does not match the quiz. Please start again.', 409);
+        }
+        unset($timers[$token]);
+        $this->session->set_userdata('studynest_quiz_timers', $timers);
+        $elapsed = max(0, (int) floor(microtime(true) - (float) $timer['started_at']));
+        return min((int) $timer['duration_seconds'], $elapsed);
     }
 }
