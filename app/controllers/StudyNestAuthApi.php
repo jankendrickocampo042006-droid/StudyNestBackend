@@ -24,6 +24,14 @@ class StudyNestAuthApi extends StudyNestApiBase
         $phase = 'reading request';
         try {
             $data = strpos($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data') !== false ? $_POST : $this->body();
+            $registration_email = strtolower(trim((string) ($data['email'] ?? '')));
+            $this->auth_rate_limit(
+                'register',
+                $registration_email !== '' ? $registration_email . ':' . session_id() : session_id(),
+                (int) (config_item('auth_registration_rate_limit') ?: 5),
+                (int) (config_item('auth_registration_rate_window') ?: 3600),
+                'consume'
+            );
             $this->verify_recaptcha($data['recaptcha_token'] ?? '');
             $name = $this->require_text($data['name'] ?? $data['full_name'] ?? '', 'Full name', 100);
             $email = trim((string) ($data['email'] ?? ''));
@@ -133,6 +141,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $email = trim((string) ($data['email'] ?? ''));
+        $this->auth_rate_limit('verify-email', $email, 10, 900, 'consume');
         $code = trim((string) ($data['code'] ?? ''));
         $user = $this->one(
             'SELECT id, email_verified_at, email_otp_hash, email_otp_expires_at, email_otp_attempts,
@@ -166,6 +175,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $email = trim((string) ($data['email'] ?? ''));
+        $this->auth_rate_limit('resend-otp', $email, 5, 3600, 'consume');
         $user = $this->one(
             'SELECT id, email_verified_at, email_otp_sent_at, email_otp_resend_count, email_otp_resend_reset_at FROM users WHERE email = ?',
             [$email]
@@ -186,6 +196,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $email = trim((string) ($data['email'] ?? ''));
+        $this->auth_rate_limit('forgot-password', $email, 5, 3600, 'consume');
         if (filter_var($email, FILTER_VALIDATE_EMAIL) && strlen($email) <= 255) {
             $user = $this->one(
                 'SELECT id, email,
@@ -240,6 +251,7 @@ class StudyNestAuthApi extends StudyNestApiBase
         $this->verify_csrf();
         $data = $this->body();
         $email = trim((string) ($data['email'] ?? ''));
+        $this->auth_rate_limit('reset-password', $email, 10, 900, 'consume');
         $code = trim((string) ($data['code'] ?? ''));
         $password = (string) ($data['password'] ?? '');
         $confirmation = (string) ($data['password_confirmation'] ?? '');
@@ -287,8 +299,15 @@ class StudyNestAuthApi extends StudyNestApiBase
     {
         $this->verify_csrf();
         $data = $this->body();
-        $this->verify_recaptcha($data['recaptcha_token'] ?? '');
         $email = trim((string) ($data['email'] ?? ''));
+        $rate_limit_identity = $email !== '' ? $email . ':' . session_id() : session_id();
+        $this->auth_rate_limit(
+            'login',
+            $rate_limit_identity,
+            (int) (config_item('auth_login_rate_limit') ?: 5),
+            (int) (config_item('auth_login_rate_window') ?: 900)
+        );
+        $this->verify_recaptcha($data['recaptcha_token'] ?? '');
         $password = (string) ($data['password'] ?? '');
         $user = $this->one(
             "SELECT id, full_name, email, password, is_active, email_verified_at, teacher_status,
@@ -308,8 +327,22 @@ class StudyNestAuthApi extends StudyNestApiBase
             ], 403);
         }
         if (!$user || (int) $user['is_active'] !== 1 || !password_verify($password, $user['password'])) {
+            $this->auth_rate_limit(
+                'login',
+                $rate_limit_identity,
+                (int) (config_item('auth_login_rate_limit') ?: 5),
+                (int) (config_item('auth_login_rate_window') ?: 900),
+                'record'
+            );
             $this->fail('Email or password is incorrect.', 401);
         }
+        $this->auth_rate_limit(
+            'login',
+            $rate_limit_identity,
+            (int) (config_item('auth_login_rate_limit') ?: 5),
+            (int) (config_item('auth_login_rate_window') ?: 900),
+            'reset'
+        );
         $this->session->regenerate_on_login();
         $this->session->set_userdata('studynest_user_id', (int) $user['id']);
         $this->respond([
@@ -328,6 +361,13 @@ class StudyNestAuthApi extends StudyNestApiBase
     {
         $this->verify_csrf();
         $data = $this->body();
+        $this->auth_rate_limit(
+            'google-login',
+            session_id(),
+            (int) (config_item('auth_google_rate_limit') ?: 20),
+            (int) (config_item('auth_google_rate_window') ?: 60),
+            'consume'
+        );
         $this->verify_recaptcha($data['recaptcha_token'] ?? '');
         $client_id = trim((string) getenv('GOOGLE_CLIENT_ID'));
         if ($client_id === '') {

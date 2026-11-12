@@ -56,6 +56,118 @@ class StudyNestApiBase extends Controller
         }
     }
 
+    protected function auth_rate_limit($bucket, $identity, $limit, $window, $operation = 'check')
+    {
+        $identity = strtolower(trim((string) $identity));
+        if ($identity === '') {
+            return;
+        }
+        if (!in_array($operation, ['check', 'record', 'consume', 'reset'], true)) {
+            throw new InvalidArgumentException('Unknown authentication rate limit operation.');
+        }
+
+        $limit = max(1, (int) $limit);
+        $window = max(1, (int) $window);
+        $file = config_item('auth_rate_limit_file') ?: ROOT_DIR . 'runtime/session/auth_rate_limits.json';
+        $directory = dirname($file);
+
+        if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
+            error_log('StudyNest authentication rate limit storage directory could not be created.');
+            $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+        }
+
+        $handle = @fopen($file, 'c+');
+        if (!$handle || !flock($handle, LOCK_EX)) {
+            if ($handle) {
+                fclose($handle);
+            }
+            error_log('StudyNest authentication rate limit storage could not be locked.');
+            $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+        }
+
+        rewind($handle);
+        $contents = stream_get_contents($handle);
+        $entries = $contents === '' ? [] : json_decode($contents, true);
+        if (!is_array($entries)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            error_log('StudyNest authentication rate limit storage contains invalid data.');
+            $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+        }
+
+        $now = time();
+        foreach ($entries as $key => $timestamps) {
+            if (!is_array($timestamps)) {
+                flock($handle, LOCK_UN);
+                fclose($handle);
+                error_log('StudyNest authentication rate limit storage contains an invalid entry.');
+                $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+            }
+            $entries[$key] = array_values(array_filter(
+                $timestamps,
+                static fn($timestamp) => is_numeric($timestamp) && (int) $timestamp > $now - 86400
+            ));
+            if (!$entries[$key]) {
+                unset($entries[$key]);
+            }
+        }
+
+        $key = hash_hmac('sha256', $bucket . ':' . $identity, (string) config_item('session_hmac_secret'));
+        $attempts = array_values(array_filter(
+            $entries[$key] ?? [],
+            static fn($timestamp) => (int) $timestamp > $now - $window
+        ));
+        if ($operation !== 'reset' && count($attempts) >= $limit) {
+            $retry_after = max(1, (int) $attempts[0] + $window - $now);
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            header('Retry-After: ' . $retry_after);
+            $message = $bucket === 'login'
+                ? 'Too many failed sign-in attempts. Please wait before trying again.'
+                : 'Too many requests. Please wait before trying again.';
+            $this->fail($message, 429);
+        }
+        unset($entries[$key]);
+        $entries[$key] = $attempts;
+        if ($operation === 'record' || $operation === 'consume') {
+            $entries[$key][] = $now;
+        } elseif ($operation === 'reset') {
+            unset($entries[$key]);
+        }
+        if (count($entries) > 5000) {
+            $entries = array_slice($entries, -5000, null, true);
+        }
+
+        $encoded = json_encode($entries);
+        $write_failed = !is_string($encoded) || !ftruncate($handle, 0);
+        if (!$write_failed && !rewind($handle)) {
+            $write_failed = true;
+        }
+        $offset = 0;
+        while (!$write_failed && $offset < strlen($encoded)) {
+            $written = fwrite($handle, substr($encoded, $offset));
+            if ($written === false || $written === 0) {
+                $write_failed = true;
+                break;
+            }
+            $offset += $written;
+        }
+        if ($write_failed || !fflush($handle)) {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            error_log('StudyNest authentication rate limit storage could not be updated.');
+            $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+        }
+        if (!chmod($file, 0600) && DIRECTORY_SEPARATOR !== '\\') {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            error_log('StudyNest authentication rate limit storage permissions could not be secured.');
+            $this->fail('Sign-in is temporarily unavailable. Please try again later.', 503);
+        }
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+
     protected function user_id()
     {
         $this->ensure_csrf_token();

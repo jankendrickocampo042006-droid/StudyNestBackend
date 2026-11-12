@@ -247,6 +247,13 @@ $config['max_session_creations']   = 10;
 $config['creation_window']         = 60;
 $config['lock_duration_creation']  = 120;
 $config['security_file']           = ROOT_DIR . 'runtime/session/session_security.json';
+$config['auth_rate_limit_file']    = ROOT_DIR . 'runtime/session/auth_rate_limits.json';
+$config['auth_login_rate_limit']   = 5;
+$config['auth_login_rate_window']  = 900;
+$config['auth_registration_rate_limit'] = 5;
+$config['auth_registration_rate_window'] = 3600;
+$config['auth_google_rate_limit']  = 20;
+$config['auth_google_rate_window'] = 60;
 $config['sess_inactivity_timeout'] = 7200;
 $config['session_hmac_secret']     = getenv('APP_KEY') ?: '';
 
